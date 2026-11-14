@@ -1,6 +1,6 @@
 module github.com/vodnalasanthosh47/Emergengy_Response_Matching/storage/storage_node
 
-go 1.27.4
+go 1.26.0
 
 require (
 	github.com/prometheus/client_golang v1.25.0
