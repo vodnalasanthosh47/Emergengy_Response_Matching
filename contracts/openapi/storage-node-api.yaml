@@ -1,0 +1,190 @@
+openapi: 3.0.3
+info:
+  title: Storage Node Internal API
+  version: 1.0.0
+  description: |
+    Internal storage-tier API (spec §4.3). **Only the coordinator calls `/internal/data` and
+    `/internal/query`**; application services never talk to storage nodes.
+
+    The data endpoints mirror the coordinator data API (`coordinator-api.yaml`) exactly:
+    same `Record`, same `expectedVersion` rules, same status codes. Schemas are referenced
+    from that file so the two can never drift apart.
+
+    The atomic check-and-set for `expectedVersion` happens **here**, at the node that owns
+    the key — the coordinator only passes it through.
+
+    `/internal/nodes/register` and `/internal/nodes/heartbeat` are **CP2 drafts**: they are
+    called *by* storage nodes and served *by* the coordinator. Nothing implements them in CP1.
+servers:
+  - url: http://storage-node:8080
+    description: Inside the Compose / Kubernetes network (not reachable from outside)
+
+paths:
+  /internal/data/{key}:
+    parameters:
+      - $ref: './coordinator-api.yaml#/components/parameters/Key'
+    get:
+      summary: Read one record
+      operationId: getRecord
+      responses:
+        '200':
+          description: The record
+          content:
+            application/json:
+              schema: { $ref: './coordinator-api.yaml#/components/schemas/Record' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    put:
+      summary: Create or replace a record, optionally conditionally (atomic per document)
+      operationId: putRecord
+      description: Same `expectedVersion` table as `PUT /v1/data/{key}` in `coordinator-api.yaml`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: './coordinator-api.yaml#/components/schemas/PutRequest' }
+      responses:
+        '200':
+          description: Existing record replaced
+          content:
+            application/json:
+              schema: { $ref: './coordinator-api.yaml#/components/schemas/Record' }
+        '201':
+          description: Record created
+          content:
+            application/json:
+              schema: { $ref: './coordinator-api.yaml#/components/schemas/Record' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/VersionConflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    delete:
+      summary: Delete a record, optionally conditionally
+      operationId: deleteRecord
+      parameters:
+        - name: expectedVersion
+          in: query
+          required: false
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        '204': { description: Deleted }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/VersionConflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /internal/query:
+    post:
+      summary: Same body as /v1/query, answered from this node's data only
+      operationId: queryRecords
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: './coordinator-api.yaml#/components/schemas/QueryRequest' }
+      responses:
+        '200':
+          description: Matching records on this node, sorted by key
+          content:
+            application/json:
+              schema: { $ref: './coordinator-api.yaml#/components/schemas/QueryResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /internal/nodes/register:
+    post:
+      summary: '[CP2 DRAFT — not implemented] Node announces itself to the coordinator on startup'
+      operationId: registerNode
+      description: Served by the coordinator. Shape is a draft and may change in CP2.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NodeInfo' }
+      responses:
+        '204': { description: Registered }
+
+  /internal/nodes/heartbeat:
+    post:
+      summary: '[CP2 DRAFT — not implemented] Node reports liveness every few seconds'
+      operationId: nodeHeartbeat
+      description: Served by the coordinator. Shape is a draft and may change in CP2.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nodeId]
+              properties:
+                nodeId: { type: string, example: node-0 }
+      responses:
+        '204': { description: Heartbeat accepted }
+        '404': { description: Unknown node — it must register again }
+
+  /healthz:
+    get:
+      summary: Liveness — the process is up
+      responses:
+        '200': { description: OK }
+  /readyz:
+    get:
+      summary: Readiness — the local MongoDB answers a ping
+      responses:
+        '200': { description: Ready }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      responses:
+        '200':
+          description: Prometheus text exposition format
+          content:
+            text/plain: {}
+
+components:
+  schemas:
+    NodeInfo:
+      type: object
+      description: '[CP2 DRAFT]'
+      required: [nodeId, address]
+      properties:
+        nodeId: { type: string, example: node-0 }
+        address: { type: string, example: 'http://storage-node-0.storage-node:8080' }
+
+  responses:
+    BadRequest:
+      description: '`INVALID_REQUEST`'
+      content:
+        application/json:
+          schema: { $ref: './coordinator-api.yaml#/components/schemas/Error' }
+    NotFound:
+      description: '`NOT_FOUND`'
+      content:
+        application/json:
+          schema: { $ref: './coordinator-api.yaml#/components/schemas/Error' }
+    VersionConflict:
+      description: '`VERSION_CONFLICT`'
+      content:
+        application/json:
+          schema: { $ref: './coordinator-api.yaml#/components/schemas/Error' }
+    PreconditionFailed:
+      description: '`PRECONDITION_FAILED`'
+      content:
+        application/json:
+          schema: { $ref: './coordinator-api.yaml#/components/schemas/Error' }
+    InternalError:
+      description: '`INTERNAL_ERROR` — unexpected failure (the coordinator reports it as 503)'
+      content:
+        application/json:
+          schema: { $ref: './coordinator-api.yaml#/components/schemas/Error' }
+    Unavailable:
+      description: '`STORAGE_UNAVAILABLE` — local MongoDB unreachable or timed out'
+      content:
+        application/json:
+          schema: { $ref: './coordinator-api.yaml#/components/schemas/Error' }

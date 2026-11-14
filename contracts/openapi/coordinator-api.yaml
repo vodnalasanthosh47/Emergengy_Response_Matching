@@ -1,0 +1,260 @@
+openapi: 3.0.3
+info:
+  title: Coordinator Data API
+  version: 1.0.0
+  description: |
+    The application services' only view of storage (spec §4.2).
+
+    **This contract is frozen from CP1.** When sharding (CP2) and replication (CP3)
+    arrive, only the coordinator's internals change — not these endpoints.
+
+    Storage is a versioned key/value store with a few exact-match "index attributes":
+
+    * `value` is the full domain document. Storage never parses it.
+    * `indexes` are flat string attributes the *writing service* copies out of `value`
+      so records can be found by `/v1/query`. Services must keep them in sync with `value`.
+    * `version` starts at 1 and increments on every successful write.
+      Writes may pass `expectedVersion` for optimistic concurrency (compare-and-set).
+      **All claims MUST use `expectedVersion`.**
+servers:
+  - url: http://coordinator:8080
+    description: Inside the Compose / Kubernetes network
+
+paths:
+  /v1/data/{key}:
+    parameters:
+      - $ref: '#/components/parameters/Key'
+    get:
+      summary: Read one record
+      operationId: getRecord
+      responses:
+        '200':
+          description: The record
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Record' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    put:
+      summary: Create or replace a record, optionally conditionally
+      operationId: putRecord
+      description: |
+        `expectedVersion` semantics:
+
+        | expectedVersion | key missing        | key exists, version == n | key exists, version != n |
+        |-----------------|--------------------|--------------------------|--------------------------|
+        | omitted         | create → 201       | replace → 200            | replace → 200            |
+        | 0               | create → 201       | 409                      | 409                      |
+        | n ≥ 1           | 412                | replace → 200            | 409                      |
+
+        On `409` the caller should re-read the record and retry its decision.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PutRequest' }
+      responses:
+        '200':
+          description: Existing record replaced
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Record' }
+        '201':
+          description: Record created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Record' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/VersionConflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    delete:
+      summary: Delete a record, optionally conditionally
+      operationId: deleteRecord
+      parameters:
+        - name: expectedVersion
+          in: query
+          required: false
+          description: |
+            If given, delete only when the current version equals this value
+            (passed as a query parameter because DELETE request bodies are poorly
+            supported by HTTP clients and proxies).
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        '204': { description: Deleted }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/VersionConflict' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /v1/query:
+    post:
+      summary: Find records by index attributes and geo cells
+      operationId: queryRecords
+      description: |
+        Returns records whose `indexes` match **all** given conditions, sorted by key.
+        Omitting `geoCells` (or sending an empty list) means "any cell"; this is how
+        `GET /resources` and `GET /requests` listings are served.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/QueryRequest' }
+      responses:
+        '200':
+          description: Matching records (possibly empty)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QueryResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /healthz:
+    get:
+      summary: Liveness — the process is up
+      responses:
+        '200': { description: OK }
+  /readyz:
+    get:
+      summary: Readiness — the storage tier is reachable
+      responses:
+        '200': { description: Ready }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      responses:
+        '200':
+          description: Prometheus text exposition format
+          content:
+            text/plain: {}
+
+components:
+  parameters:
+    Key:
+      name: key
+      in: path
+      required: true
+      description: |
+        Storage key. Conventions (spec §3.5): `request:{uuid}`, `resource:{geoCell}:{uuid}`.
+        Allowed characters: letters, digits, `:`, `_`, `-`; 1–256 characters.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9:_-]{1,256}$'
+      example: 'resource:tdr1yz:8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77'
+
+  schemas:
+    Record:
+      type: object
+      required: [key, value, indexes, version, updatedAt]
+      properties:
+        key: { type: string, example: 'resource:tdr1yz:8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77' }
+        value:
+          type: object
+          additionalProperties: true
+          description: The full domain document, returned exactly as written.
+        indexes: { $ref: '#/components/schemas/Indexes' }
+        version: { type: integer, format: int64, minimum: 1, example: 7 }
+        updatedAt: { type: string, format: date-time, description: 'Set by storage (UTC, millisecond precision)' }
+
+    Indexes:
+      type: object
+      description: |
+        Flat, exact-match string attributes used by `/v1/query`.
+        `collection` is required. Attribute names: letters, digits, `_` only.
+      required: [collection]
+      additionalProperties: { type: string }
+      properties:
+        collection: { type: string, example: resource }
+      example: { collection: resource, type: WATER, status: AVAILABLE, geoCell: tdr1yz }
+
+    PutRequest:
+      type: object
+      required: [value, indexes]
+      properties:
+        value:
+          type: object
+          additionalProperties: true
+          description: Full domain document (must be a JSON object). Opaque to storage.
+        indexes: { $ref: '#/components/schemas/Indexes' }
+        expectedVersion:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 'Omit = unconditional write; 0 = "must not exist"; n = "current version must be n".'
+      example:
+        value: { resourceId: res_tdr1yz_8a7c, type: WATER, capacity: { total: 500, remaining: 480, unit: L } }
+        indexes: { collection: resource, type: WATER, status: AVAILABLE, geoCell: tdr1yz }
+        expectedVersion: 6
+
+    QueryRequest:
+      type: object
+      required: [collection]
+      properties:
+        collection: { type: string, example: resource }
+        geoCells:
+          type: array
+          items: { type: string }
+          maxItems: 100
+          description: Match records whose `indexes.geoCell` is any of these. Omit or empty = any cell.
+          example: [tdr1yz, tdr1yy, tdr1zn]
+        match:
+          type: object
+          additionalProperties: { type: string }
+          description: Exact match on index attributes (all must match).
+          example: { type: WATER, status: AVAILABLE }
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          default: 50
+
+    QueryResponse:
+      type: object
+      required: [records]
+      properties:
+        records:
+          type: array
+          items: { $ref: '#/components/schemas/Record' }
+
+    Error:
+      type: object
+      required: [error, message, timestamp]
+      properties:
+        error:
+          type: string
+          enum: [INVALID_REQUEST, NOT_FOUND, VERSION_CONFLICT, PRECONDITION_FAILED, STORAGE_UNAVAILABLE, INTERNAL_ERROR]
+        message: { type: string }
+        timestamp: { type: string, format: date-time }
+      example:
+        error: VERSION_CONFLICT
+        message: 'version of resource:tdr1yz:8a7c is not 6'
+        timestamp: '2026-11-14T06:53:00Z'
+
+  responses:
+    BadRequest:
+      description: Malformed body, invalid key, or invalid field (`INVALID_REQUEST`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: No record with this key (`NOT_FOUND`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    VersionConflict:
+      description: '`expectedVersion` does not match the current state (`VERSION_CONFLICT`). Re-read and retry.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    PreconditionFailed:
+      description: '`expectedVersion` ≥ 1 was given but the key does not exist (`PRECONDITION_FAILED`)'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unavailable:
+      description: The storage tier could not be reached or failed (`STORAGE_UNAVAILABLE`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
