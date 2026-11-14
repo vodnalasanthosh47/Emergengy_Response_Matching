@@ -29,7 +29,7 @@ func NewMetrics(namespace string) *Metrics {
 		requests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "http_requests_total",
-			Help:      "HTTP requests by route pattern, method and status code.",
+			Help:      "HTTP requests by route (method + pattern) and status code.",
 		}, []string{"route", "code"}),
 		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace,
