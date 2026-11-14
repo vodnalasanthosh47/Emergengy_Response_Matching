@@ -1,0 +1,17 @@
+# Secrets / local config (commit .env.example instead)
+.env
+
+# Go build output and test artifacts
+bin/
+*.test
+*.out
+coverage.*
+
+# Java / Maven
+target/
+
+# IDEs and OS files
+.idea/
+.vscode/
+*.iml
+.DS_Store
