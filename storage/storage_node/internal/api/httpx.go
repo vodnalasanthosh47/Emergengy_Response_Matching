@@ -45,9 +45,11 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 
 // decodeJSON reads exactly one JSON object from the body into dst.
 //
-// Unknown fields are rejected on purpose: a typo such as "expectedversion" would
-// otherwise be silently ignored and turn a conditional claim into an unconditional
-// overwrite — exactly the double-booking bug we must never have.
+// Unknown fields are rejected on purpose: a misspelling such as "expectedVerison"
+// would otherwise be silently ignored and turn a conditional claim into an
+// unconditional overwrite — exactly the double-booking bug we must never have.
+// (encoding/json matches names case-insensitively, so "expectedversion" binds to
+// expectedVersion and stays conditional; only real misspellings need catching.)
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	dec := json.NewDecoder(r.Body)

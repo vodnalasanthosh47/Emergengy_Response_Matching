@@ -248,6 +248,21 @@ func (r *Registry) Primary(shard int) (Node, bool) {
 	return *n, true
 }
 
+// IsPrimary reports whether node id, in registration epoch, is still its shard's
+// usable primary. A write is acknowledged only if this holds after it was replicated:
+// otherwise the node was replaced while the write was in flight, and the write may
+// exist only on a node that no longer serves the shard.
+func (r *Registry) IsPrimary(id string, epoch uint64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n, ok := r.nodes[id]
+	if !ok || n.Epoch != epoch {
+		return false
+	}
+	p, ok := r.primaryLocked(n.Shard)
+	return ok && p == n
+}
+
 // Readable returns the nodes that may serve reads for shard: the primary first,
 // then ACTIVE replicas. Never SYNCING, ELECTING or DOWN nodes.
 func (r *Registry) Readable(shard int) []Node {

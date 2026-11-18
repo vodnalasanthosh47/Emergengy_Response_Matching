@@ -50,10 +50,17 @@ func (c *Client) Run(ctx context.Context) {
 		case err != nil:
 			// Keep trying: the coordinator may be starting or restarting.
 			c.Log.Warn("coordinator unreachable", "path", path, "err", err)
-		case status == http.StatusNotFound:
+		case status == http.StatusNotFound && registered:
+			// The coordinator forgot us (it restarted, or declared us DOWN): register
+			// again right away rather than staying invisible for another interval.
 			c.Log.Warn("coordinator does not know this node; registering again")
 			registered = false
 			continue
+		case status == http.StatusNotFound:
+			// Registration itself was not found: COORDINATOR_URL most likely points at
+			// the wrong service. Retry on the normal schedule; looping immediately here
+			// would flood that service and burn a CPU.
+			c.Log.Error("coordinator has no registration endpoint; check COORDINATOR_URL", "url", c.CoordinatorURL)
 		case status >= 300:
 			c.Log.Warn("coordinator rejected node", "path", path, "status", status)
 		default:

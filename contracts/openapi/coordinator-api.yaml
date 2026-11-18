@@ -6,13 +6,21 @@ info:
     The application services' only view of storage (spec §4.2).
 
     **This contract is frozen from CP1.** Sharding and replication are invisible here:
-    the coordinator routes each key to its shard (`crc32(homeCell) mod 3`, where
-    `homeCell` is the key's second segment), writes through the shard's primary,
-    replicates to its replica before answering, and reads from the replica when the
-    primary is down. Clients never learn where a record is stored (spec §4).
+    the coordinator derives each key's shard from the key itself (see the `key`
+    parameter: requests by `crc32(requestId) mod 3`, resources by
+    `crc32(geoCell) mod 3`), writes through the shard's primary, replicates to its
+    replica before answering, and reads from the replica when the primary is down.
+    Clients never learn where a record is stored (spec §4).
+
+    A write is acknowledged (2xx) only once it is on the shard's current primary and
+    every live replica. If the primary is replaced while a write is in flight, the
+    answer is `503` (outcome unknown): re-read and retry.
 
     `/internal/nodes/*` and `/internal/topology` are for storage nodes and operators,
     not for application services.
+
+    The full data format (keys, required indexes, request and resource documents,
+    worked examples) is in `docs/data-format.md`.
 
     Storage is a versioned key/value store with a few exact-match "index attributes":
 
@@ -102,6 +110,11 @@ paths:
         Returns records whose `indexes` match **all** given conditions, sorted by key.
         Omitting `geoCells` (or sending an empty list) means "any cell"; this is how
         `GET /resources` and `GET /requests` listings are served.
+
+        A `resource` query limited to cells (`geoCells`, or `match.geoCell`) is sent
+        only to the shards that own those cells, so it keeps working while an
+        unrelated shard is down. Every other query is sent to all shards and fails
+        with `503` if any shard has no live node (never a silently partial answer).
       requestBody:
         required: true
         content:
@@ -217,14 +230,26 @@ components:
       in: path
       required: true
       description: |
-        Storage key: `{collection}:{homeCell}:{uuid}`, where `homeCell` is the geohash
-        (precision 5) of the entity's location at creation. The coordinator shards on
-        `homeCell`, so it must never change. Allowed characters: letters, digits, `:`,
-        `_`, `-`; 1–256 characters.
+        Storage key. Allowed characters: letters, digits, `:`, `_`, `-`; 1–256
+        characters. The shard is derived from the key alone, so request and resource
+        keys must have their collection's shape (otherwise `400`):
+
+        | Collection | Key | Shard |
+        |---|---|---|
+        | request | `request:{requestId}` | `crc32(requestId) mod 3` |
+        | resource | `resource:{geoCell}:{uuid}` | `crc32(geoCell) mod 3` |
+        | anything else | any valid key | `crc32(key) mod 3` |
+
+        `geoCell` is the lower-case geohash (1–12 characters of
+        `0-9b-hjkmnp-z`) of the resource's location, at the precision the Resource
+        Service uses (`GEOHASH_PRECISION`, default 6). It is part of the key, so it
+        never changes: moving a resource means re-keying it (delete + create).
       schema:
         type: string
         pattern: '^[A-Za-z0-9:_-]{1,256}$'
-      example: 'resource:tdr1y:8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77'
+      examples:
+        request: { value: 'request:f3b1c2e4-0d1e-4a5b-9c8d-7e6f5a4b3c2d' }
+        resource: { value: 'resource:tdr1yz:8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77' }
 
   schemas:
     NodeInfo:
@@ -248,7 +273,7 @@ components:
       type: object
       required: [key, value, indexes, version, updatedAt]
       properties:
-        key: { type: string, example: 'resource:tdr1y:8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77' }
+        key: { type: string, example: 'resource:tdr1yz:8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77' }
         value:
           type: object
           additionalProperties: true
@@ -262,6 +287,11 @@ components:
       description: |
         Flat, exact-match string attributes used by `/v1/query`.
         `collection` is required. Attribute names: letters, digits, `_` only.
+
+        Must agree with the key (otherwise `400`): a `request:` key needs
+        `collection: request`; a `resource:{geoCell}:{uuid}` key needs
+        `collection: resource` and `geoCell` equal to the key's cell (geo queries are
+        routed by cell, so a resource indexed under another cell would be missed).
       required: [collection]
       additionalProperties: { type: string }
       properties:
@@ -333,7 +363,7 @@ components:
 
   responses:
     BadRequest:
-      description: Malformed body, invalid key, or invalid field (`INVALID_REQUEST`)
+      description: Malformed body, invalid key or key shape, indexes that contradict the key, or invalid field (`INVALID_REQUEST`)
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -353,7 +383,10 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
     Unavailable:
-      description: The storage tier could not be reached or failed (`STORAGE_UNAVAILABLE`)
+      description: |
+        The storage tier could not be reached or failed, or the shard's primary was
+        replaced while the write was in flight (`STORAGE_UNAVAILABLE`). For a write the
+        outcome is unknown: re-read the record and retry.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }

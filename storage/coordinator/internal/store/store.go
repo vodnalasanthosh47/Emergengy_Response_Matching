@@ -1,7 +1,7 @@
 // Package store defines how the coordinator reaches the storage tier.
 //
 // The HTTP handlers depend only on the RecordStore interface, implemented by
-// ShardedStore: it routes each key to its shard (geohash of the key's homeCell),
+// ShardedStore: it routes each key to its shard (requests by ID, resources by cell),
 // writes through the shard's primary, replicates to the shard's replicas, and reads
 // from a replica when the primary is down. Forwarder is the HTTP client for one
 // storage node, and Pool keeps one Forwarder per node.

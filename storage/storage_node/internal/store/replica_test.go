@@ -19,7 +19,7 @@ func replicaRec(key string, version int64, value string, at time.Time) model.Rec
 
 func TestApplyReplicaKeepsNewestVersion(t *testing.T) {
 	s, ctx := newTestStore(t), testCtx(t)
-	key := "request:tdr1y:r1"
+	key := "request:r1"
 
 	// v2 arrives before v1 (out of order): v2 is applied, the late v1 is ignored.
 	if ok, err := s.ApplyReplica(ctx, replicaRec(key, 2, `{"n":2}`, t0.Add(time.Second))); err != nil || !ok {
@@ -58,7 +58,7 @@ func TestApplyReplicaKeepsNewestVersion(t *testing.T) {
 
 func TestRecreateAfterDeleteKeepsCountingVersions(t *testing.T) {
 	s, ctx := newTestStore(t), testCtx(t)
-	key := "request:tdr1y:r2"
+	key := "request:r2"
 	if _, _, err := s.Put(ctx, key, putReq(`{}`, ptr(0))); err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestRecreateAfterDeleteKeepsCountingVersions(t *testing.T) {
 
 func TestRepairAndPurgeAreConditional(t *testing.T) {
 	s, ctx := newTestStore(t), testCtx(t)
-	key := "request:tdr1y:r3"
+	key := "request:r3"
 	if _, err := s.ApplyReplica(ctx, replicaRec(key, 4, `{"mine":true}`, t0)); err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestSincePagesWithoutSkippingEqualTimestamps(t *testing.T) {
 		if i >= 7 {
 			at = t0.Add(time.Duration(i) * time.Second)
 		}
-		rec := replicaRec(fmt.Sprintf("request:c:%02d", i), 1, `{}`, at)
+		rec := replicaRec(fmt.Sprintf("request:c%02d", i), 1, `{}`, at)
 		rec.Deleted = i == 8
 		if _, err := s.ApplyReplica(ctx, rec); err != nil {
 			t.Fatal(err)
@@ -135,7 +135,7 @@ func TestSincePagesWithoutSkippingEqualTimestamps(t *testing.T) {
 		want[rec.Key] = true
 	}
 	// An older record outside the window must not be returned.
-	if _, err := s.ApplyReplica(ctx, replicaRec("request:c:old", 1, `{}`, t0.Add(-time.Hour))); err != nil {
+	if _, err := s.ApplyReplica(ctx, replicaRec("request:c-old", 1, `{}`, t0.Add(-time.Hour))); err != nil {
 		t.Fatal(err)
 	}
 
@@ -175,9 +175,9 @@ func TestStatsAndMaxUpdatedAt(t *testing.T) {
 	if m, err := s.MaxUpdatedAt(ctx); err != nil || !m.IsZero() {
 		t.Fatalf("empty MaxUpdatedAt = %v, %v", m, err)
 	}
-	_, _ = s.ApplyReplica(ctx, replicaRec("request:s:1", 1, `{}`, t0))
-	_, _ = s.ApplyReplica(ctx, replicaRec("request:s:2", 1, `{}`, t0.Add(time.Minute)))
-	_, _ = s.ApplyReplica(ctx, model.Record{Key: "request:s:3", Version: 2, UpdatedAt: t0, Deleted: true})
+	_, _ = s.ApplyReplica(ctx, replicaRec("request:s1", 1, `{}`, t0))
+	_, _ = s.ApplyReplica(ctx, replicaRec("request:s2", 1, `{}`, t0.Add(time.Minute)))
+	_, _ = s.ApplyReplica(ctx, model.Record{Key: "request:s3", Version: 2, UpdatedAt: t0, Deleted: true})
 	st, err := s.Stats(ctx)
 	if err != nil || st.Records != 2 || st.Tombstones != 1 || !st.MaxUpdatedAt.Equal(t0.Add(time.Minute)) {
 		t.Fatalf("Stats = %+v, %v", st, err)

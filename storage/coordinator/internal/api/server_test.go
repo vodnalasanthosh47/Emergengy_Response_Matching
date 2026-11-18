@@ -68,7 +68,10 @@ func newTestHandler(fs *fakeStore) (*Metrics, func(method, path, body string) *h
 	}
 }
 
-const validPut = `{"value":{"a":1},"indexes":{"collection":"request"}}`
+const (
+	validPut         = `{"value":{"a":1},"indexes":{"collection":"request"}}`
+	validResourcePut = `{"value":{"a":1},"indexes":{"collection":"resource","geoCell":"tdr1yz","type":"WATER"}}`
+)
 
 func TestHandlers(t *testing.T) {
 	tests := []struct {
@@ -110,6 +113,18 @@ func TestHandlers(t *testing.T) {
 		{"query bad limit", "POST", "/v1/query", `{"collection":"r","limit":5000}`, nil, false, 400, codeInvalidRequest, true},
 		{"query storage down", "POST", "/v1/query", `{"collection":"r"}`, store.ErrUnavailable, false, 503, codeStorageUnavailable, false},
 
+		// Key shapes decide the shard, so malformed request/resource keys never reach storage.
+		{"get request keyed by cell", "GET", "/v1/data/request:tdr1y:1", "", nil, false, 400, codeInvalidRequest, true},
+		{"get resource without cell", "GET", "/v1/data/resource:1", "", nil, false, 400, codeInvalidRequest, true},
+		{"get resource non-geohash cell", "GET", "/v1/data/resource:smoke1:1", "", nil, false, 400, codeInvalidRequest, true},
+		{"get resource ok", "GET", "/v1/data/resource:tdr1yz:1", "", nil, false, 200, "", false},
+		{"put request keyed by cell", "PUT", "/v1/data/request:tdr1y:1", validPut, nil, false, 400, codeInvalidRequest, true},
+		{"put request wrong collection", "PUT", "/v1/data/request:1", `{"value":{},"indexes":{"collection":"resource"}}`, nil, false, 400, codeInvalidRequest, true},
+		{"put resource ok", "PUT", "/v1/data/resource:tdr1yz:1", validResourcePut, nil, true, 201, "", false},
+		{"put resource indexed in other cell", "PUT", "/v1/data/resource:tdr1yz:1", `{"value":{},"indexes":{"collection":"resource","geoCell":"tdr1yy"}}`, nil, false, 400, codeInvalidRequest, true},
+		{"put resource without geoCell", "PUT", "/v1/data/resource:tdr1yz:1", `{"value":{},"indexes":{"collection":"resource"}}`, nil, false, 400, codeInvalidRequest, true},
+		{"delete resource without cell", "DELETE", "/v1/data/resource:1", "", nil, false, 400, codeInvalidRequest, true},
+
 		{"healthz ignores storage", "GET", "/healthz", "", store.ErrUnavailable, false, 200, "", false},
 		{"readyz ok", "GET", "/readyz", "", nil, false, 200, "", false},
 		{"readyz storage down", "GET", "/readyz", "", store.ErrUnavailable, false, 503, codeStorageUnavailable, false},
@@ -141,7 +156,7 @@ func TestSuccessfulResponsesCarryTheRecord(t *testing.T) {
 	fs := &fakeStore{created: true}
 	_, do := newTestHandler(fs)
 
-	rr := do("PUT", "/v1/data/resource:tdr1yz:abc", `{"value":{"a":1},"indexes":{"collection":"resource"},"expectedVersion":0}`)
+	rr := do("PUT", "/v1/data/resource:tdr1yz:abc", `{"value":{"a":1},"indexes":{"collection":"resource","geoCell":"tdr1yz"},"expectedVersion":0}`)
 	var rec model.Record
 	if err := json.Unmarshal(rr.Body.Bytes(), &rec); err != nil || rec.Key != "request:1" || rec.Version != 3 {
 		t.Fatalf("response = %s", rr.Body)

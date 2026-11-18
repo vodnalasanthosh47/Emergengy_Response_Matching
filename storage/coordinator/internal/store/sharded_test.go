@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -15,33 +16,65 @@ import (
 	"github.com/vodnalasanthosh47/Emergengy_Response_Matching/storage/coordinator/internal/store"
 )
 
-var cells = []string{"tdr1x", "tdr1y", "tdr1z", "tdr1v", "tdr1w", "u4pru", "te7ud", "ttnfv", "tsq4e", "tepf1"}
+// Geohash cells (precision 6) around Bengaluru and elsewhere; they map to all 3 shards.
+var cells = []string{"tdr1yz", "tdr1yy", "tdr1zn", "tdr1yv", "tdr1yw", "tdr1yx", "u4pruy", "te7udq", "ttnfv2", "tsq4e7"}
 
 func newStore(t *testing.T) (*store.ShardedStore, *fakenode.Cluster) {
 	c := fakenode.NewCluster(t, 3, 2)
 	return store.NewSharded(c.Reg, store.NewPool(time.Second), c.Log), c
 }
 
-func put(t *testing.T, s *store.ShardedStore, key, cell string) model.Record {
+func requestKey(i int) string { return fmt.Sprintf("request:%08d-0000-4000-8000-%012d", i, i) }
+
+func resourceKey(cell string, i int) string {
+	return fmt.Sprintf("resource:%s:%08d-1111-4000-8000-%012d", cell, i, i)
+}
+
+// putRequest stores a PENDING request under request:{id}. The geoCell index is only
+// searchable data here; it plays no part in where the request is stored.
+func putRequest(t *testing.T, s *store.ShardedStore, key, cell string) model.Record {
 	t.Helper()
-	rec, _, err := s.Put(context.Background(), key, model.PutRequest{
-		Value:   json.RawMessage(`{"k":"` + key + `"}`),
-		Indexes: map[string]string{"collection": "request", "geoCell": cell, "status": "PENDING"},
-	})
+	return mustPut(t, s, key, map[string]string{"collection": "request", "geoCell": cell, "status": "PENDING", "type": "WATER"})
+}
+
+func putResource(t *testing.T, s *store.ShardedStore, key string) model.Record {
+	t.Helper()
+	k, err := routing.ParseKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mustPut(t, s, key, map[string]string{"collection": "resource", "geoCell": k.GeoCell, "status": "AVAILABLE", "type": "WATER"})
+}
+
+func mustPut(t *testing.T, s *store.ShardedStore, key string, indexes map[string]string) model.Record {
+	t.Helper()
+	rec, _, err := s.Put(context.Background(), key, model.PutRequest{Value: json.RawMessage(`{"k":"` + key + `"}`), Indexes: indexes})
 	if err != nil {
 		t.Fatalf("Put %s: %v", key, err)
 	}
 	return rec
 }
 
-func TestKeysLiveOnTheirGeohashShardOnPrimaryAndReplica(t *testing.T) {
+// TestRecordsLiveOnTheirShardOnPrimaryAndReplica: requests are placed by request ID,
+// resources by geohash cell; every record is on exactly one shard, on both its nodes.
+func TestRecordsLiveOnTheirShardOnPrimaryAndReplica(t *testing.T) {
 	s, c := newStore(t)
 	perShard := make([]int, 3)
-	for i := 0; i < 90; i++ {
-		cell := cells[i%len(cells)]
-		key := fmt.Sprintf("request:%s:%03d", cell, i)
-		put(t, s, key, cell)
+	for i := range 60 {
+		key := requestKey(i)
+		putRequest(t, s, key, "tdr1yz") // all from the same place...
 		perShard[routing.ShardFor(key, 3)]++
+	}
+	requestShards := slices.Clone(perShard)
+	for i := range 60 {
+		key := resourceKey(cells[i%len(cells)], i)
+		putResource(t, s, key)
+		perShard[routing.ShardForCell(cells[i%len(cells)], 3)]++
+	}
+	for shard, n := range requestShards {
+		if n == 0 { // ...yet spread over every shard, because they are placed by ID
+			t.Errorf("no request landed on shard %d (%v): requests must be sharded by ID, not location", shard, requestShards)
+		}
 	}
 	for shard, nodes := range c.Shards {
 		for _, n := range nodes {
@@ -63,19 +96,92 @@ func TestKeysLiveOnTheirGeohashShardOnPrimaryAndReplica(t *testing.T) {
 			}
 		}
 	}
-	for shard, n := range perShard {
-		if n == 0 {
-			t.Errorf("shard %d got no data: %v", shard, perShard)
+}
+
+func TestResourcesOfACellShareOneShard(t *testing.T) {
+	s, c := newStore(t)
+	const cell = "tdr1yz"
+	for i := range 10 {
+		putResource(t, s, resourceKey(cell, i))
+	}
+	want := routing.ShardForCell(cell, 3)
+	for shard, nodes := range c.Shards {
+		got := nodes[0].Live()
+		if shard == want && got != 10 || shard != want && got != 0 {
+			t.Errorf("shard %d holds %d of the cell's resources; all 10 belong on shard %d", shard, got, want)
 		}
+	}
+}
+
+func TestTargetShards(t *testing.T) {
+	shardOf := func(cs ...string) []int {
+		var out []int
+		for _, c := range cs {
+			out = append(out, routing.ShardForCell(c, 3))
+		}
+		slices.Sort(out)
+		return slices.Compact(out)
+	}
+	tests := []struct {
+		name string
+		q    model.QueryRequest
+		want []int
+	}{
+		{"resource in cells: owners only", model.QueryRequest{Collection: "resource", GeoCells: []string{"tdr1yz", "tdr1yy"}}, shardOf("tdr1yz", "tdr1yy")},
+		{"resource in one cell via match", model.QueryRequest{Collection: "resource", Match: map[string]string{"geoCell": "tdr1yz"}}, shardOf("tdr1yz")},
+		{"resource, no cells: all", model.QueryRequest{Collection: "resource", Match: map[string]string{"type": "WATER"}}, []int{0, 1, 2}},
+		{"requests are sharded by ID: always all", model.QueryRequest{Collection: "request", GeoCells: []string{"tdr1yz"}}, []int{0, 1, 2}},
+		{"many cells cover all shards at most once", model.QueryRequest{Collection: "resource", GeoCells: cells}, []int{0, 1, 2}},
+	}
+	for _, tt := range tests {
+		if got := store.TargetShards(tt.q, 3); !slices.Equal(got, tt.want) {
+			t.Errorf("%s: TargetShards = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
+
+// TestResourceQueryOnlyAsksOwningShards: a proximity search touches only the shards
+// that own the queried cells, so it keeps working while an unrelated shard is down.
+func TestResourceQueryOnlyAsksOwningShards(t *testing.T) {
+	s, c := newStore(t)
+	for i, cell := range cells {
+		putResource(t, s, resourceKey(cell, i))
+	}
+	const cell = "tdr1yz" // shard 2
+	owner := routing.ShardForCell(cell, 3)
+	q := model.QueryRequest{Collection: "resource", GeoCells: []string{cell}, Match: map[string]string{"type": "WATER"}}
+
+	recs, err := s.Query(context.Background(), q)
+	if err != nil || len(recs) != 1 || recs[0].Key != resourceKey(cell, 0) {
+		t.Fatalf("Query = %v, %v; want the one resource in %s", recs, err, cell)
+	}
+	for shard, nodes := range c.Shards {
+		asked := nodes[0].Queries.Load() + nodes[1].Queries.Load()
+		if shard == owner && asked != 1 || shard != owner && asked != 0 {
+			t.Errorf("shard %d was asked %d times; only shard %d owns %s", shard, asked, owner, cell)
+		}
+	}
+
+	// Take a shard that does not own the cell completely down.
+	other := (owner + 1) % 3
+	for _, n := range c.Shards[other] {
+		n.Down.Store(true)
+	}
+	if recs, err := s.Query(context.Background(), q); err != nil || len(recs) != 1 {
+		t.Fatalf("geo query with unrelated shard %d down = %v, %v", other, recs, err)
+	}
+	// A query that must scatter cannot give a complete answer, and says so.
+	if _, err := s.Query(context.Background(), model.QueryRequest{Collection: "request"}); !errors.Is(err, store.ErrUnavailable) {
+		t.Fatalf("scatter query with shard %d down = %v, want ErrUnavailable", other, err)
 	}
 }
 
 func TestReadAndWriteContinueWhenPrimaryFails(t *testing.T) {
 	s, c := newStore(t)
 	ctx := context.Background()
-	key := "request:tdr1y:k1"
+	key := requestKey(1)
 	shard := routing.ShardFor(key, 3)
-	put(t, s, key, "tdr1y")
+	putRequest(t, s, key, "tdr1yz")
 
 	primary, replica := c.Shards[shard][0], c.Shards[shard][1]
 	primary.Down.Store(true)
@@ -102,16 +208,17 @@ func TestReadAndWriteContinueWhenPrimaryFails(t *testing.T) {
 
 func TestWriteToFailedPrimaryReturnsUnavailableAndFailsOver(t *testing.T) {
 	s, c := newStore(t)
-	key := "request:tdr1x:k2"
+	key := resourceKey("tdr1yy", 2)
 	shard := routing.ShardFor(key, 3)
 	c.Shards[shard][0].Down.Store(true)
 
-	_, _, err := s.Put(context.Background(), key, model.PutRequest{Value: json.RawMessage(`{}`), Indexes: map[string]string{"collection": "request"}})
+	_, _, err := s.Put(context.Background(), key, model.PutRequest{Value: json.RawMessage(`{}`),
+		Indexes: map[string]string{"collection": "resource", "geoCell": "tdr1yy"}})
 	if !errors.Is(err, store.ErrUnavailable) {
 		t.Fatalf("Put to dead primary = %v, want ErrUnavailable", err)
 	}
 	// The client's retry succeeds on the promoted replica.
-	put(t, s, key, "tdr1x")
+	putResource(t, s, key)
 	if got := c.Shards[shard][1].Live(); got != 1 {
 		t.Errorf("new primary holds %d records", got)
 	}
@@ -119,12 +226,12 @@ func TestWriteToFailedPrimaryReturnsUnavailableAndFailsOver(t *testing.T) {
 
 func TestFailedReplicaIsMarkedDownWriteStillSucceeds(t *testing.T) {
 	s, c := newStore(t)
-	key := "request:tdr1z:k3"
+	key := requestKey(3)
 	shard := routing.ShardFor(key, 3)
 	replica := c.Shards[shard][1]
 	replica.Down.Store(true)
 
-	put(t, s, key, "tdr1z")
+	putRequest(t, s, key, "tdr1yz")
 	n, _ := c.Reg.Get(replica.ID)
 	if n.State != registry.StateDown {
 		t.Fatalf("replica state = %s, want DOWN", n.State)
@@ -136,9 +243,9 @@ func TestFailedReplicaIsMarkedDownWriteStillSucceeds(t *testing.T) {
 
 func TestDeleteReplicatesTombstone(t *testing.T) {
 	s, c := newStore(t)
-	key := "request:tdr1v:k4"
+	key := resourceKey("tdr1zn", 4)
 	shard := routing.ShardFor(key, 3)
-	put(t, s, key, "tdr1v")
+	putResource(t, s, key)
 	if err := s.Delete(context.Background(), key, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -155,9 +262,8 @@ func TestDeleteReplicatesTombstone(t *testing.T) {
 
 func TestQueryMergesAllShardsInKeyOrder(t *testing.T) {
 	s, _ := newStore(t)
-	for i := 0; i < 30; i++ {
-		cell := cells[i%len(cells)]
-		put(t, s, fmt.Sprintf("request:%s:%03d", cell, i), cell)
+	for i := range 30 {
+		putRequest(t, s, requestKey(i), cells[i%len(cells)])
 	}
 	recs, err := s.Query(context.Background(), model.QueryRequest{Collection: "request", Match: map[string]string{"status": "PENDING"}, Limit: 1000})
 	if err != nil || len(recs) != 30 {
@@ -189,8 +295,9 @@ func TestQueryAndReadyFailWhenAShardHasNoLiveNode(t *testing.T) {
 
 func TestTopologyShowsRolesAndCounts(t *testing.T) {
 	s, c := newStore(t)
-	put(t, s, "request:tdr1y:t1", "tdr1y")
-	shard := routing.ShardFor("request:tdr1y:t1", 3)
+	key := requestKey(42)
+	putRequest(t, s, key, "tdr1yz")
+	shard := routing.ShardFor(key, 3)
 	topo := s.Topology(context.Background())
 	if len(topo) != 3 {
 		t.Fatalf("topology has %d shards", len(topo))

@@ -22,9 +22,9 @@ const (
 )
 
 var (
-	// Keys look like "{collection}:{homeCell}:{uuid}": the coordinator shards on the
-	// homeCell geohash (internal/routing). Forbidding "/" keeps a key a single URL
-	// path segment.
+	// Keys look like "request:{requestId}" or "resource:{geoCell}:{uuid}"; the shard is
+	// derived from them in internal/routing, which also checks those shapes.
+	// Forbidding "/" keeps a key a single URL path segment.
 	keyPattern = regexp.MustCompile(`^[A-Za-z0-9:_-]{1,256}$`)
 
 	// Index attribute names become MongoDB field paths ("indexes.<name>"), so they must

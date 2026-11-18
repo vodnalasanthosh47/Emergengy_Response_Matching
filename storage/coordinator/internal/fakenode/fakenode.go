@@ -23,6 +23,11 @@ type Node struct {
 	ID, URL string
 	// Down makes every call fail with 503, like a node whose process is gone.
 	Down atomic.Bool
+	// PutDelay and ReplicaDelay (nanoseconds) slow down PUT /internal/data and
+	// PUT /internal/replica before they are applied, to stage races in tests.
+	PutDelay, ReplicaDelay atomic.Int64
+	// Queries counts POST /internal/query calls this node answered.
+	Queries atomic.Int64
 
 	srv  *httptest.Server
 	mu   sync.Mutex
@@ -88,6 +93,7 @@ func (n *Node) handler() http.Handler {
 		reply(w, 200, rec)
 	})
 	mux.HandleFunc("PUT /internal/data/{key}", func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(time.Duration(n.PutDelay.Load()))
 		var req model.PutRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		key := r.PathValue("key")
@@ -133,6 +139,7 @@ func (n *Node) handler() http.Handler {
 		reply(w, 200, tomb)
 	})
 	mux.HandleFunc("PUT /internal/replica/{key}", func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(time.Duration(n.ReplicaDelay.Load()))
 		var rec model.Record
 		_ = json.NewDecoder(r.Body).Decode(&rec)
 		n.mu.Lock()
@@ -209,6 +216,7 @@ func (n *Node) handler() http.Handler {
 		reply(w, 200, page)
 	})
 	mux.HandleFunc("POST /internal/query", func(w http.ResponseWriter, r *http.Request) {
+		n.Queries.Add(1)
 		var q model.QueryRequest
 		_ = json.NewDecoder(r.Body).Decode(&q)
 		out := []model.Record{}

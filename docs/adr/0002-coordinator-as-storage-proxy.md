@@ -22,10 +22,11 @@ that owns the key. This API is frozen from CP1.
 Inside the coordinator, the HTTP handlers depend on a `RecordStore` interface:
 
 - CP1 implementation: `Forwarder`, which sent everything to one node.
-- Now: `ShardedStore`, which does geohash routing (ADR 0006), replication, read
+- Now: `ShardedStore`, which does sharding (requests by ID, resources by geohash; ADR 0006), replication, read
   fallback and scatter-gather queries behind the same interface (ADR 0009). The
-  `Forwarder` remains as the HTTP client for one node. The `/v1` contract did not
-  change.
+  `Forwarder` remains as the HTTP client for one node. The `/v1` endpoints and
+  their semantics did not change; the key shapes the shard is derived from are now
+  enforced (ADR 0006).
 
 The coordinator does **not** do versioning. The atomic compare-and-set (`expectedVersion`)
 runs on the storage node that owns the key, so exactly one place decides each write.

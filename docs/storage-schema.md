@@ -5,6 +5,11 @@ storage node. Only the storage-node process talks to this database. The applicat
 services and the coordinator see records through the HTTP contracts in
 `contracts/openapi/`, and never see MongoDB itself.
 
+**For the data format itself** (keys, the record, index attributes, the request and
+resource documents, and how the services must build them) see
+[`data-format.md`](data-format.md). This file covers how such a record is laid out
+inside MongoDB.
+
 Source of truth in code:
 - `storage/storage_node/internal/store/mongo.go`: document shape, writes, indexes
 - `storage/storage_node/internal/store/filter.go`: query → MongoDB filter
@@ -38,30 +43,27 @@ collection). The storage-node code enforces it on every write.
 
 ### Key formats (spec §3.5)
 
-| Collection | Key format                   | Example |
-|------------|------------------------------|---------|
-| request    | `request:{homeCell}:{uuid}`  | `request:tdr1y:f3b1c2e4-0d1e-4a5b-9c8d-7e6f5a4b3c2d` |
-| resource   | `resource:{homeCell}:{uuid}` | `resource:tdr1y:8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77` |
+| Collection | Key format                  | Shard                    | Example |
+|------------|-----------------------------|--------------------------|---------|
+| request    | `request:{requestId}`       | `crc32(requestId) mod 3` | `request:f3b1c2e4-0d1e-4a5b-9c8d-7e6f5a4b3c2d` |
+| resource   | `resource:{geoCell}:{uuid}` | `crc32(geoCell) mod 3`   | `resource:tdr1v9:8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77` |
 
-`homeCell` is the geohash (precision 5) of the entity's location **at creation**, and
-never changes. The coordinator places every record on shard `crc32(homeCell) mod 3`
-(ADR 0006), so a record never moves between shards. A key without a cell segment
-(e.g. `request:{uuid}`) is routed on its second segment instead.
+Requests are spread by their ID; resources are grouped by the geohash cell of their
+location (precision 6 by default), so a proximity search only asks the shards owning
+the searched cells (ADR 0006). The coordinator derives the shard from the key alone,
+and a record never moves between shards: the cell is part of a resource's key, so
+moving a resource means re-keying it. The coordinator rejects request/resource keys
+of any other shape, and a resource whose `indexes.geoCell` is not its key's cell.
 
 The client-facing `resourceId` is `res_{geoCell}_{uuid}`. The Resource Service
 translates between that and the storage key.
 
-### Index attributes the services are expected to write
+### Index attributes
 
-| Attribute    | Example     | Used for |
-|--------------|-------------|----------|
-| `collection` | `resource`  | Required on every record; every query filters on it |
-| `type`       | `WATER`     | Matching by category |
-| `status`     | `AVAILABLE` | Finding available resources / pending requests |
-| `geoCell`    | `tdr1yz`    | Geo search (cell + 8 neighbours) |
-
-Storage accepts other valid attribute names too, but only the four above have MongoDB
-indexes.
+`collection`, `type`, `status` and `geoCell`; which are required for each collection,
+and the rule that a resource's `geoCell` equals its key's cell, are in
+[`data-format.md` §4](data-format.md#4-index-attributes). Storage accepts other valid
+attribute names too, but only these four have MongoDB indexes (section 3).
 
 ---
 
@@ -87,20 +89,20 @@ this is safe on every restart.
 
 ```js
 {
-  _id: "resource:tdr1yz:8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77",
+  _id: "resource:tdr1v9:8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77",
   value: {
-    resourceId: "res_tdr1yz_8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77",
+    resourceId: "res_tdr1v9_8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77",
     type: "WATER",
     provider: { name: "Akshaya NGO", kind: "NGO", contact: "..." },
     location: { lat: 12.97, lng: 77.59 },
-    geoCell: "tdr1yz",
+    geoCell: "tdr1v9",
     capacity: { total: 500, remaining: 480, unit: "L" },
     details: {},
     status: "AVAILABLE",
     createdAt: "2026-11-14T06:53:00Z",
     updatedAt: "2026-11-14T07:10:00Z"
   },
-  indexes: { collection: "resource", type: "WATER", status: "AVAILABLE", geoCell: "tdr1yz" },
+  indexes: { collection: "resource", type: "WATER", status: "AVAILABLE", geoCell: "tdr1v9" },
   version: NumberLong(7),
   updatedAt: ISODate("2026-11-14T07:10:00.123Z")
 }
@@ -115,22 +117,23 @@ this is safe on every restart.
     requestId: "f3b1c2e4-0d1e-4a5b-9c8d-7e6f5a4b3c2d",
     type: "WATER",
     location: { lat: 12.9716, lng: 77.5946 },
-    geoCell: "tdr1yz",
+    geoCell: "tdr1v9",
     status: "MATCHED",
     requester: { name: "...", contact: "..." },
     details: { quantity: 20, unit: "L" },
-    assignedResourceId: "res_tdr1yz_8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77",
+    assignedResourceId: "res_tdr1v9_8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77",
     createdAt: "2026-11-14T06:53:00Z",
     updatedAt: "2026-11-14T06:53:02Z"
   },
-  indexes: { collection: "request", type: "WATER", status: "MATCHED", geoCell: "tdr1yz" },
+  indexes: { collection: "request", type: "WATER", status: "MATCHED", geoCell: "tdr1v9" },
   version: NumberLong(2),
   updatedAt: ISODate("2026-11-14T06:53:02.481Z")
 }
 ```
 
-The contents of `value` follow the domain model in PROJECT_SPEC §3.2 (requests) and
-§3.3 (resources). The Java services write it in that shape; storage does not check it.
+The contents of `value` are specified in [`data-format.md`](data-format.md) §5
+(requests) and §6 (resources). The Java services write it in that shape; storage does
+not check it. `tdr1v9` is the real precision-6 geohash of the example coordinates.
 
 ---
 
@@ -158,7 +161,7 @@ Notes:
 ### Query (`POST /v1/query`) → filter
 
 ```json
-{ "collection": "resource", "geoCells": ["tdr1yz", "tdr1yy"],
+{ "collection": "resource", "geoCells": ["tdr1v9", "tdr1yy"],
   "match": { "type": "WATER", "status": "AVAILABLE" }, "limit": 10 }
 ```
 
@@ -167,7 +170,7 @@ becomes
 ```js
 db.records.find({
   "indexes.collection": "resource",
-  "indexes.geoCell":    { $in: ["tdr1yz", "tdr1yy"] },
+  "indexes.geoCell":    { $in: ["tdr1v9", "tdr1yy"] },
   "indexes.type":       "WATER",
   "indexes.status":     "AVAILABLE"
 }).sort({ _id: 1 }).limit(10)

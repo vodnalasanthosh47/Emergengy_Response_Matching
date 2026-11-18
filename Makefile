@@ -15,7 +15,7 @@ COMPOSE_DEV := $(COMPOSE) -f deploy/compose/docker-compose.dev.yml
 K8S_DIR     := deploy/k8s/storage
 
 .PHONY: help build test images up up-dev down logs ps topology storage-smoke storage-failover \
-	k8s-images k8s-up k8s-down clean
+	storage-resilience storage-e2e k8s-images k8s-up k8s-down clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-17s\033[0m %s\n", $$1, $$2}'
@@ -59,6 +59,11 @@ storage-smoke: ## Smoke-test the storage tier through the coordinator (needs `ma
 
 storage-failover: ## Distribution + kill a primary + recovery test (needs `make up-dev`; SHARD=0..2)
 	BASE_URL=$${BASE_URL:-http://localhost:9090} tests/e2e/storage-failover.sh
+
+storage-resilience: ## Concurrent claims, MongoDB failure, coordinator and full restarts (needs `make up-dev`)
+	BASE_URL=$${BASE_URL:-http://localhost:9090} tests/e2e/storage-resilience.sh
+
+storage-e2e: storage-smoke storage-failover storage-resilience ## All storage end-to-end tests (needs `make up-dev`)
 
 k8s-images: images ## Load the images (and mongo:7.0) into Minikube
 	minikube image load $(IMAGE_REPO)/coordinator:local

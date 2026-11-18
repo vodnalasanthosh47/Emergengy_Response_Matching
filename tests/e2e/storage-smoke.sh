@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Storage-tier smoke test: drives the coordinator data API end to end
-# (coordinator → storage node → MongoDB) and checks the versioning rules.
+# (coordinator → storage node → MongoDB) and checks the versioning rules and the key
+# formats the shard is derived from:
+#   request:{requestId}          sharded by a hash of the request ID
+#   resource:{geohash}:{uuid}    sharded by a hash of the geohash cell
 #
 # Usage:  BASE_URL=http://localhost:9090 tests/e2e/storage-smoke.sh
 # Needs:  curl, jq, and the stack started with `make up-dev`.
@@ -9,9 +12,10 @@
 set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://localhost:9090}"
-CELL="smoke1"
+CELL="tdr1yz" # a geohash (precision 6), as the Resource Service computes it
 KEY="resource:${CELL}:$(date +%s)-${RANDOM}"
 MISSING="resource:${CELL}:does-not-exist-${RANDOM}"
+REQUEST_KEY="request:smoke-$(date +%s)-${RANDOM}"
 
 BODY_FILE="$(mktemp)"
 trap 'rm -f "$BODY_FILE"' EXIT
@@ -94,5 +98,25 @@ expect 204 "conditional delete with the current version"
 
 call GET "/v1/data/${KEY}"
 expect 404 "deleted record is gone"
+
+echo "Requests are keyed by request ID only"
+call PUT "/v1/data/${REQUEST_KEY}" '{"value":{"type":"WATER","status":"PENDING"},"indexes":{"collection":"request","type":"WATER","status":"PENDING","geoCell":"tdr1yz"},"expectedVersion":0}'
+expect 201 "create a request under request:{requestId}"
+call GET "/v1/data/${REQUEST_KEY}"
+expect 200 "read the request back by ID"
+expect_json .value.status PENDING "request value round-trips"
+
+echo "Keys and indexes that would break routing are rejected"
+call PUT "/v1/data/request:${CELL}:abc" '{"value":{},"indexes":{"collection":"request"}}'
+expect 400 "request key with a cell segment (requests are sharded by ID)"
+expect_json .error INVALID_REQUEST "rejection uses the standard error shape"
+call GET "/v1/data/resource:abc-uuid-only"
+expect 400 "resource key without a geohash cell"
+call GET "/v1/data/resource:smoke1:abc"
+expect 400 "resource key whose cell is not a geohash"
+call PUT "/v1/data/resource:${CELL}:abc" '{"value":{},"indexes":{"collection":"resource","geoCell":"tdr1yy"}}'
+expect 400 "resource indexed under a different cell than its key"
+call PUT "/v1/data/request:abc" '{"value":{},"indexes":{"collection":"resource"}}'
+expect 400 "indexes.collection must match the key"
 
 echo "PASS: storage smoke test"

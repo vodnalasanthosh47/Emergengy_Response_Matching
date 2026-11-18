@@ -25,6 +25,17 @@ available, and when it comes back it must catch up. We implement this ourselves 
   - A replica that fails the copy is marked DOWN.
   - Replicas apply a copy only if its version is ≥ the version they hold. That makes
     replays and out-of-order delivery harmless.
+- **Write fencing during failover** (added 2026-11-19, after a test showed a claim
+  could be double-booked):
+  - A write is acknowledged only if, after replication, the node it ran on is still
+    the shard's primary in the same registration epoch. Otherwise the primary was
+    replaced mid-write, the new primary may not have it, and the caller gets `503`
+    ("outcome unknown: re-read and retry") instead of a success it could lose.
+  - A per-shard **write gate** lets writes run on only one node of a shard at a time:
+    a newly promoted primary waits (at most one storage timeout) until writes still
+    in flight on the old primary have finished. Without it, an old write's late
+    replica copy could overwrite, at the same version, a claim the new primary had
+    already acknowledged.
 - **Reads:** the primary, falling back to an ACTIVE replica in the same call.
 - **Failover:** when a primary goes DOWN, an ACTIVE replica is promoted (newest data
   breaks ties). Every ACTIVE replica holds every acknowledged write, so none is lost.

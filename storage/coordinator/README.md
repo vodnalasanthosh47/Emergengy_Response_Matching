@@ -15,13 +15,13 @@ services ──/v1/data, /v1/query──► coordinator ──/internal/...─�
 
 | Concern | Where | Behaviour |
 |---|---|---|
-| **Sharding** | `internal/routing` | Keys are `{collection}:{homeCell}:{uuid}`. Shard = `crc32(homeCell) mod 3`. `homeCell` is the geohash of the entity's location at creation and never changes, so records never move and everything created in one cell lives together. CRC32 is stable across restarts. |
+| **Sharding** | `internal/routing` | Requests: `request:{requestId}`, shard = `crc32(requestId) mod 3` (even spread, one shard per lookup). Resources: `resource:{geoCell}:{uuid}`, shard = `crc32(geoCell) mod 3` (every resource of a cell together). Other keys: `crc32(key) mod 3`. Malformed request/resource keys, and indexes that contradict the key (`collection`, a resource's `geoCell`), are rejected with `400`. CRC32 is stable across restarts and languages (ADR 0006). |
 | **Membership** | `internal/registry` | Nodes `POST /internal/nodes/register` on startup and `/internal/nodes/heartbeat` every 5 s, sending `nodeId`, `shardId`, `url`, and their newest `updatedAt`. |
 | **Failure detection** | `internal/registry` | A sweeper runs every second. A node silent for 15 s (3 heartbeats) is marked **DOWN** and gets no more traffic. A call that fails also marks the node DOWN at once. A late heartbeat from a DOWN node gets `404`, and the node registers again. |
 | **Primary election** | `internal/registry` | A shard with no primary (cold start, coordinator restart, whole shard was down) waits 10 s for nodes, then elects the registering node with the newest data. |
-| **Writes** | `internal/store/sharded.go` | Sent to the shard's primary, the only node that checks `expectedVersion`. The primary's result is copied to every ACTIVE and SYNCING replica **before** the caller gets an answer. A replica that fails the copy is marked DOWN. So every ACTIVE replica holds every acknowledged write. |
+| **Writes** | `internal/store/sharded.go` | Sent to the shard's primary, the only node that checks `expectedVersion`. The primary's result is copied to every ACTIVE and SYNCING replica **before** the caller gets an answer. A replica that fails the copy is marked DOWN. So every ACTIVE replica holds every acknowledged write. A write is acknowledged only if its primary is still the primary afterwards (else `503`, outcome unknown), and a per-shard write gate keeps writes from running on an old and a new primary at once, so a failover can never let two claims on the same version both succeed. |
 | **Reads** | `internal/store/sharded.go` | Go to the primary. If it is unreachable, the next ACTIVE replica answers in the same call. SYNCING nodes never serve reads. |
-| **Queries** | `internal/store/sharded.go` | Scatter-gather: sent to all 3 shards in parallel, merged in key order, cut to `limit`. If a shard has no readable node, the query returns `503`. |
+| **Queries** | `internal/store/sharded.go` | Resource queries limited to cells go only to the shards owning those cells (a 9-cell proximity search touches at most 3). Other queries are scatter-gather over all 3 shards. Results are merged in key order and cut to `limit`. If an asked shard has no readable node, the query returns `503`. |
 | **Failover** | `internal/registry` | When a primary goes DOWN, the ACTIVE replica with the newest data is promoted. No acknowledged write is lost. |
 | **Recovery** | `internal/replication` | A node that registers into a shard with a primary becomes **SYNCING**: it receives new writes but serves no reads. Pass 1 copies everything the primary changed since the node's newest write minus 30 s. Pass 2 repairs writes the node holds but the primary never acknowledged. Then the node is marked **ACTIVE**. |
 
@@ -41,9 +41,9 @@ Any state can become `DOWN`, and from there the node re-registers.
 |---|---|
 | `cmd/coordinator/` | `main.go` (wiring, graceful shutdown, `-healthcheck`), `config.go` (env vars) |
 | `internal/api/` | HTTP handlers: data API, node registration and heartbeat, topology, error JSON, metrics |
-| `internal/routing/` | key → shard (geohash `homeCell`, CRC32) |
+| `internal/routing/` | key → shard: requests by ID, resources by geohash cell (CRC32); key-shape and key/indexes checks |
 | `internal/registry/` | Node registry, failure detection, election, failover |
-| `internal/store/` | `RecordStore` interface, `ShardedStore` (routing, replication, read fallback, scatter-gather), `Forwarder` (HTTP client for one node), `Pool` |
+| `internal/store/` | `RecordStore` interface, `ShardedStore` (routing, replication, read fallback, geo-routed and scatter-gather queries), write gate (`gate.go`), `Forwarder` (HTTP client for one node), `Pool` |
 | `internal/replication/` | Recovery `Syncer` (copy and repair passes) |
 | `internal/fakenode/` | In-memory storage node used by the tests |
 | `internal/model/` | Contract types and validation (a deliberate copy of the storage node's) |

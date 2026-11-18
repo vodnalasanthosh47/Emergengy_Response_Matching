@@ -14,11 +14,11 @@ import (
 	"github.com/vodnalasanthosh47/Emergengy_Response_Matching/storage/coordinator/internal/store"
 )
 
-// keysOn returns n keys that route to shard.
+// keysOn returns n request keys (request:{requestId}) that route to shard.
 func keysOn(shard, n int) []string {
 	var out []string
 	for i := 0; len(out) < n; i++ {
-		k := fmt.Sprintf("request:c%04d:%d", i, i)
+		k := fmt.Sprintf("request:%08d-5555-4000-8000-%012d", i, i)
 		if routing.ShardFor(k, 3) == shard {
 			out = append(out, k)
 		}
@@ -76,7 +76,7 @@ func TestFailedNodeRecoversMissedWritesDeletesAndDivergence(t *testing.T) {
 	orphan.UpdatedAt = orphan.UpdatedAt.Add(time.Second)
 	orphan.Value = json.RawMessage(`{"v":"never-acknowledged"}`)
 	a.Seed(orphan)
-	a.Seed(model.Record{Key: "request:zzzz:orphan-only-on-a", Value: json.RawMessage(`{}`), Version: 1, UpdatedAt: orphan.UpdatedAt})
+	a.Seed(model.Record{Key: "request:orphan-only-on-a", Value: json.RawMessage(`{}`), Version: 1, UpdatedAt: orphan.UpdatedAt})
 	a.Down.Store(true)
 
 	// a stops heartbeating; the others keep going. The failure detector marks a DOWN

@@ -25,8 +25,8 @@ MongoDB 8 refuses to start on Linux kernels 6.19.0–7.0.13 (SERVER-121912).
 One collection, `records`:
 
 ```js
-{ _id: "resource:tdr1y:8a7c…", value: { …domain document… },
-  indexes: { collection: "resource", type: "WATER", status: "AVAILABLE", geoCell: "tdr1y" },
+{ _id: "resource:tdr1yz:8a7c…", value: { …domain document… },
+  indexes: { collection: "resource", type: "WATER", status: "AVAILABLE", geoCell: "tdr1yz" },
   version: 7, updatedAt: ISODate("…"), deleted: false }
 ```
 

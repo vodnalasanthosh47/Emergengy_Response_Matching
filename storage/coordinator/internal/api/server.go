@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/vodnalasanthosh47/Emergengy_Response_Matching/storage/coordinator/internal/model"
+	"github.com/vodnalasanthosh47/Emergengy_Response_Matching/storage/coordinator/internal/routing"
 	"github.com/vodnalasanthosh47/Emergengy_Response_Matching/storage/coordinator/internal/store"
 )
 
@@ -56,8 +57,7 @@ func NewHandler(st store.RecordStore, cluster Cluster, log *slog.Logger, metrics
 
 func (s *server) getRecord(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
-	if err := model.ValidateKey(key); err != nil {
-		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+	if _, ok := parseKey(w, key); !ok {
 		return
 	}
 	rec, err := s.store.Get(r.Context(), key)
@@ -70,8 +70,8 @@ func (s *server) getRecord(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) putRecord(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
-	if err := model.ValidateKey(key); err != nil {
-		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+	k, ok := parseKey(w, key)
+	if !ok {
 		return
 	}
 	var req model.PutRequest
@@ -80,6 +80,12 @@ func (s *server) putRecord(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+		return
+	}
+	// A resource stored under one cell but indexed under another would be invisible to
+	// geo queries, which only ask the shards owning the queried cells.
+	if err := k.CheckIndexes(req.Indexes); err != nil {
 		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
 		return
 	}
@@ -97,8 +103,7 @@ func (s *server) putRecord(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) deleteRecord(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
-	if err := model.ValidateKey(key); err != nil {
-		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+	if _, ok := parseKey(w, key); !ok {
 		return
 	}
 	expected, err := parseExpectedVersion(r)
@@ -171,6 +176,22 @@ func (s *server) writeStoreError(w http.ResponseWriter, key string, err error) {
 		s.log.Error("unexpected store error", "key", key, "err", err)
 		writeError(w, http.StatusInternalServerError, codeInternalError, "internal error")
 	}
+}
+
+// parseKey checks the key against the contract's pattern and its collection's shape
+// (request:{requestId}, resource:{geohash}:{uuid}), answering 400 if it is invalid.
+// The shape matters because the shard is derived from it.
+func parseKey(w http.ResponseWriter, key string) (routing.Key, bool) {
+	if err := model.ValidateKey(key); err != nil {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+		return routing.Key{}, false
+	}
+	k, err := routing.ParseKey(key)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+		return routing.Key{}, false
+	}
+	return k, true
 }
 
 // parseExpectedVersion reads the optional ?expectedVersion= query parameter of DELETE.

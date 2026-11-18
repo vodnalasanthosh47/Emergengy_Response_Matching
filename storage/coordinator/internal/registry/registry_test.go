@@ -1,7 +1,9 @@
 package registry
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -210,4 +212,88 @@ func mustGet(t *testing.T, r *Registry, id string) Node {
 		t.Fatalf("no node %s", id)
 	}
 	return n
+}
+
+func TestIsPrimary(t *testing.T) {
+	r, c := newReg()
+	bootShard(t, r, c)
+	r.SetActive(drain(r)[0])
+	a := mustGet(t, r, "a")
+	if !r.IsPrimary("a", a.Epoch) {
+		t.Fatal("a should be primary")
+	}
+	if r.IsPrimary("b", mustGet(t, r, "b").Epoch) || r.IsPrimary("ghost", 1) {
+		t.Fatal("only the shard's primary is primary")
+	}
+	if r.IsPrimary("a", a.Epoch+100) {
+		t.Fatal("a stale or wrong epoch must not count")
+	}
+	r.MarkDown("a", a.Epoch, "crash")
+	if r.IsPrimary("a", a.Epoch) {
+		t.Fatal("a DOWN node is not primary")
+	}
+	if !r.IsPrimary("b", mustGet(t, r, "b").Epoch) {
+		t.Fatal("b should have been promoted")
+	}
+	// a comes back with a new epoch as a SYNCING replica: its old epoch is not primary.
+	mustRegister(t, r, info("a", 0, base))
+	if r.IsPrimary("a", a.Epoch) || r.IsPrimary("a", mustGet(t, r, "a").Epoch) {
+		t.Fatal("a rejoined as a replica")
+	}
+}
+
+// TestElectionWithNoSurvivingCandidate: every candidate dies during the election
+// window; the shard stays without a primary and the next registration opens a new
+// election (instead of the shard being stuck forever).
+func TestElectionWithNoSurvivingCandidate(t *testing.T) {
+	r, c := newReg()
+	mustRegister(t, r, info("a", 0, base))
+	r.MarkDown("a", mustGet(t, r, "a").Epoch, "died while electing")
+	c.advance(10 * time.Second)
+	r.Sweep()
+	if _, ok := r.Primary(0); ok {
+		t.Fatal("a DOWN node must not be elected")
+	}
+	mustRegister(t, r, info("b", 0, base))
+	if _, ok := r.Primary(0); ok {
+		t.Fatal("primary chosen before the new window closed")
+	}
+	c.advance(10 * time.Second)
+	r.Sweep()
+	if p, ok := r.Primary(0); !ok || p.ID != "b" {
+		t.Fatalf("primary = %+v, %v; want b from the second election", p, ok)
+	}
+}
+
+func TestSnapshotOrderAndSweeper(t *testing.T) {
+	r, c := newReg()
+	for _, n := range []model.NodeInfo{info("z", 2, base), info("b", 0, base), info("m", 1, base), info("a", 0, base.Add(time.Second))} {
+		mustRegister(t, r, n)
+	}
+	c.advance(10 * time.Second)
+	r.Sweep() // elections close: a (newest) wins shard 0, m shard 1, z shard 2
+
+	var got []string
+	for _, n := range r.Snapshot() {
+		got = append(got, fmt.Sprintf("%d:%s:%s", n.Shard, n.ID, n.Role))
+	}
+	want := "[0:a:PRIMARY 0:b:REPLICA 1:m:PRIMARY 2:z:PRIMARY]"
+	if fmt.Sprint(got) != want {
+		t.Fatalf("Snapshot = %v, want %s (by shard, primary first, then ID)", got, want)
+	}
+
+	// RunSweeper drives Sweep on its own: after the timeout passes, nodes go DOWN.
+	c.advance(time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.RunSweeper(ctx, time.Millisecond); close(done) }()
+	deadline := time.Now().Add(time.Second)
+	for mustGet(t, r, "z").State != StateDown {
+		if time.Now().After(deadline) {
+			t.Fatal("RunSweeper never marked the silent node DOWN")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done // and it stops when its context is cancelled
 }
