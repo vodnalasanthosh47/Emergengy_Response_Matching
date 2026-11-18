@@ -60,7 +60,7 @@ func (f *fakeStore) Ready(context.Context) error { return f.err }
 
 func newTestHandler(fs *fakeStore) (*Metrics, func(method, path, body string) *httptest.ResponseRecorder) {
 	m := NewMetrics("coordinator")
-	h := NewHandler(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), m, time.Second)
+	h := NewHandler(fs, testCluster(&fakeNodes{}), slog.New(slog.NewTextHandler(io.Discard, nil)), m, time.Second)
 	return m, func(method, path, body string) *httptest.ResponseRecorder {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, httptest.NewRequest(method, path, strings.NewReader(body)))

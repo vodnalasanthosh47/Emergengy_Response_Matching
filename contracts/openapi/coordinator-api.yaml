@@ -5,8 +5,14 @@ info:
   description: |
     The application services' only view of storage (spec §4.2).
 
-    **This contract is frozen from CP1.** When sharding (CP2) and replication (CP3)
-    arrive, only the coordinator's internals change — not these endpoints.
+    **This contract is frozen from CP1.** Sharding and replication are invisible here:
+    the coordinator routes each key to its shard (`crc32(homeCell) mod 3`, where
+    `homeCell` is the key's second segment), writes through the shard's primary,
+    replicates to its replica before answering, and reads from the replica when the
+    primary is down. Clients never learn where a record is stored (spec §4).
+
+    `/internal/nodes/*` and `/internal/topology` are for storage nodes and operators,
+    not for application services.
 
     Storage is a versioned key/value store with a few exact-match "index attributes":
 
@@ -110,6 +116,80 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '503': { $ref: '#/components/responses/Unavailable' }
 
+  /internal/nodes/register:
+    post:
+      summary: A storage node announces itself (on startup, or after a 404 heartbeat)
+      operationId: registerNode
+      description: |
+        The node joins its shard as a replica: SYNCING (copies what it missed from the
+        shard's primary, then ACTIVE) if the shard has a primary, otherwise ELECTING
+        (the shard elects the registered node with the newest data after a short window).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NodeInfo' }
+      responses:
+        '200':
+          description: Registered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RoleResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /internal/nodes/heartbeat:
+    post:
+      summary: A storage node reports it is alive (every 5 s)
+      operationId: nodeHeartbeat
+      description: A node silent for HEARTBEAT_TIMEOUT (15 s) is marked DOWN.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NodeInfo' }
+      responses:
+        '200':
+          description: Heartbeat accepted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RoleResponse' }
+        '404': { description: 'Unknown or DOWN node: it must register again' }
+
+  /internal/topology:
+    get:
+      summary: Shards, their nodes (role, state, last heartbeat) and record counts
+      operationId: getTopology
+      responses:
+        '200':
+          description: Cluster view
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  shards:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        shard: { type: integer }
+                        primary: { type: string, description: 'Absent: the shard has no primary (503s)' }
+                        nodes:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              nodeId: { type: string }
+                              shardId: { type: integer }
+                              url: { type: string }
+                              role: { type: string, enum: [PRIMARY, REPLICA] }
+                              state: { type: string, enum: [ELECTING, SYNCING, ACTIVE, DOWN] }
+                              lastSeen: { type: string, format: date-time }
+                              maxUpdatedAt: { type: string, format: date-time }
+                              records: { type: integer, format: int64 }
+                              tombstones: { type: integer, format: int64 }
+                              error: { type: string }
+
   /healthz:
     get:
       summary: Liveness — the process is up
@@ -117,7 +197,7 @@ paths:
         '200': { description: OK }
   /readyz:
     get:
-      summary: Readiness — the storage tier is reachable
+      summary: Readiness — every shard has a primary
       responses:
         '200': { description: Ready }
         '503': { $ref: '#/components/responses/Unavailable' }
@@ -137,19 +217,38 @@ components:
       in: path
       required: true
       description: |
-        Storage key. Conventions (spec §3.5): `request:{uuid}`, `resource:{geoCell}:{uuid}`.
-        Allowed characters: letters, digits, `:`, `_`, `-`; 1–256 characters.
+        Storage key: `{collection}:{homeCell}:{uuid}`, where `homeCell` is the geohash
+        (precision 5) of the entity's location at creation. The coordinator shards on
+        `homeCell`, so it must never change. Allowed characters: letters, digits, `:`,
+        `_`, `-`; 1–256 characters.
       schema:
         type: string
         pattern: '^[A-Za-z0-9:_-]{1,256}$'
-      example: 'resource:tdr1yz:8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77'
+      example: 'resource:tdr1y:8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77'
 
   schemas:
+    NodeInfo:
+      type: object
+      required: [nodeId, shardId, url]
+      properties:
+        nodeId: { type: string, example: storage-1-0 }
+        shardId: { type: integer, minimum: 0, example: 1 }
+        url: { type: string, example: 'http://storage-1-0.storage-1.emergency.svc.cluster.local:8080' }
+        maxUpdatedAt:
+          type: string
+          format: date-time
+          description: Newest updatedAt on the node; used to elect the most up-to-date node and as the start of a resync.
+
+    RoleResponse:
+      type: object
+      properties:
+        role: { type: string, enum: [PRIMARY, REPLICA] }
+
     Record:
       type: object
       required: [key, value, indexes, version, updatedAt]
       properties:
-        key: { type: string, example: 'resource:tdr1yz:8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77' }
+        key: { type: string, example: 'resource:tdr1y:8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77' }
         value:
           type: object
           additionalProperties: true

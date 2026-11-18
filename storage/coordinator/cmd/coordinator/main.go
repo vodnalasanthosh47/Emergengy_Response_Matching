@@ -1,5 +1,6 @@
 // Command coordinator is the single entry point to the storage tier. It holds no
-// application data. This file is wiring only: config, RecordStore, HTTP server, shutdown.
+// application data, only the soft-state registry of storage nodes. This file is
+// wiring only: config, registry, sharded store, recovery syncer, HTTP server, shutdown.
 package main
 
 import (
@@ -15,6 +16,8 @@ import (
 	"time"
 
 	"github.com/vodnalasanthosh47/Emergengy_Response_Matching/storage/coordinator/internal/api"
+	"github.com/vodnalasanthosh47/Emergengy_Response_Matching/storage/coordinator/internal/registry"
+	"github.com/vodnalasanthosh47/Emergengy_Response_Matching/storage/coordinator/internal/replication"
 	"github.com/vodnalasanthosh47/Emergengy_Response_Matching/storage/coordinator/internal/store"
 )
 
@@ -44,13 +47,26 @@ func run(cfg config, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// CP1: forward everything to one storage node. CP2 swaps in ring routing here —
-	// the only line in this file that changes.
-	var records store.RecordStore = store.NewForwarder(cfg.StorageNodeURL, cfg.StorageTimeout)
+	reg := registry.New(registry.Config{
+		Shards:           cfg.Shards,
+		HeartbeatTimeout: cfg.HeartbeatTimeout,
+		ElectionWindow:   cfg.ElectionWindow,
+		Log:              logger,
+	})
+	go reg.RunSweeper(ctx, cfg.SweepInterval)
+
+	pool := store.NewPool(cfg.StorageTimeout)
+	sharded := store.NewSharded(reg, pool, logger)
+	syncer := &replication.Syncer{Reg: reg, Pool: pool, Overlap: cfg.SyncOverlap, PageSize: 500, Retry: 2 * time.Second, Log: logger}
+	go syncer.Run(ctx)
+
+	metrics := api.NewMetrics("coordinator")
+	metrics.WatchCluster(reg.Snapshot, reg.Failovers)
+	cluster := api.Cluster{Nodes: reg, Topology: func(ctx context.Context) any { return sharded.Topology(ctx) }}
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           api.NewHandler(records, logger, api.NewMetrics("coordinator"), cfg.StorageTimeout),
+		Handler:           api.NewHandler(sharded, cluster, logger, metrics, cfg.StorageTimeout),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -59,7 +75,7 @@ func run(cfg config, logger *slog.Logger) error {
 
 	serveErr := make(chan error, 1)
 	go func() {
-		logger.Info("listening", "addr", srv.Addr, "storage_node", cfg.StorageNodeURL)
+		logger.Info("listening", "addr", srv.Addr, "shards", cfg.Shards, "heartbeat_timeout", cfg.HeartbeatTimeout)
 		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- err
 		}

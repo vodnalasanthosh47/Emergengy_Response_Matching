@@ -1,91 +1,197 @@
-# CP1 local runtime (spec §7.1 F). Run via the Makefile: `make images && make up`.
+# Local runtime of the storage tier (spec §7.1 F). Run via the Makefile:
+#     make images && make up
 #
-# This file currently holds the storage tier only:
-#     coordinator ──/internal/...──► storage-node ──driver──► mongo
-# The application services, RabbitMQ and the nginx gateway (the only published port,
-# 8080) are added here next.
+#   3 shards × 2 storage nodes (one primary + one replica per shard), each node with its
+#   own standalone MongoDB, plus one coordinator:
 #
-# Written so that moving to Kubernetes in CP2 is mechanical: one process per
-# container, all config from environment variables, health endpoints everywhere.
+#     coordinator ◄──register/heartbeat── storage-{0,1,2}-{a,b} ──driver──► mongo-{0,1,2}-{a,b}
+#                 ──/internal/...──────►
+#
+# Nodes register themselves with the coordinator, which elects each shard's primary,
+# replicates writes to the replica, fails over when a node stops heartbeating and
+# resyncs it when it comes back. Demo a failure with:
+#     docker compose -p emergency stop storage-1-a   …   docker compose -p emergency start storage-1-a
+#
+# Written so that moving to Kubernetes is mechanical: one process per container, all
+# config from environment variables, health endpoints everywhere.
 
 name: emergency
 
+# MongoDB 7.0, not 8.x: MongoDB 8 refuses to start on Linux kernels 6.19.0–7.0.13
+# (SERVER-121912). We use only features 7.0 has.
+x-mongo: &mongo
+  image: mongo:7.0
+  # Standalone mongod — deliberately NO replica set or sharding: replication and
+  # sharding are implemented by our own storage tier (ADR 0008).
+  command: ["--wiredTigerCacheSizeGB", "0.25"]
+  # No "ports:" section and only the internal "mongo" network: only storage nodes
+  # can reach MongoDB.
+  networks: [mongo]
+  mem_limit: 384m
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+    interval: 10s
+    timeout: 5s
+    retries: 5
+    start_period: 30s
+    start_interval: 2s
+
+x-storage-node: &storage-node
+  image: emergency/storage-node:${IMAGE_TAG:-local}
+  networks: [mongo, storage]
+  mem_limit: 64m
+  # "no", so that a node stopped for the failure demo stays down until started again.
+  restart: "no"
+  healthcheck:
+    # Distroless has no curl, so the binary probes its own /readyz.
+    test: ["CMD", "/storage-node", "-healthcheck"]
+    interval: 10s
+    timeout: 3s
+    retries: 3
+    start_period: 15s
+    start_interval: 2s
+
+x-storage-env: &storage-env
+  SERVER_PORT: "8080"
+  MONGO_DB: storage
+  COORDINATOR_URL: http://coordinator:8080
+  HEARTBEAT_INTERVAL: 5s
+  # Tell the Go garbage collector about the container limit so it collects before
+  # the kernel OOM-kills the process (Go does not read cgroup memory limits itself).
+  GOMEMLIMIT: 48MiB
+
 services:
-  mongo:
-    image: mongo:8.0
-    # Standalone mongod — deliberately NO replica set or sharding: replication and
-    # sharding are implemented by our own storage tier (spec decision 2.2-8).
-    command: ["--wiredTigerCacheSizeGB", "0.25"]
-    volumes:
-      - mongo-data:/data/db
-    # No "ports:" section, so MongoDB is not reachable from the host. It is attached
-    # only to the internal "mongo" network, so only the storage node can reach it.
-    networks: [mongo]
-    mem_limit: 512m
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-      start_interval: 2s
-
-  storage-node:
-    image: emergency/storage-node:${IMAGE_TAG:-local}
-    environment:
-      SERVER_PORT: "8080"
-      NODE_ID: node-0
-      MONGO_URI: mongodb://mongo:27017
-      MONGO_DB: storage
-      # Tell the Go garbage collector about the container limit so it collects before
-      # the kernel OOM-kills the process (Go does not read cgroup memory limits itself).
-      GOMEMLIMIT: 48MiB
-    networks: [mongo, storage]
-    mem_limit: 64m
-    restart: unless-stopped
-    depends_on:
-      mongo:
-        condition: service_healthy
-    healthcheck:
-      # Distroless has no curl, so the binary probes its own /readyz.
-      test: ["CMD", "/storage-node", "-healthcheck"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 15s
-      start_interval: 2s
-
   coordinator:
     image: emergency/coordinator:${IMAGE_TAG:-local}
     environment:
       SERVER_PORT: "8080"
-      STORAGE_NODE_URL: http://storage-node:8080
+      SHARD_COUNT: "3"
       STORAGE_TIMEOUT: 3s
+      HEARTBEAT_TIMEOUT: 15s
+      ELECTION_WINDOW: 10s
       GOMEMLIMIT: 48MiB
     networks: [storage]
     mem_limit: 64m
     restart: unless-stopped
-    depends_on:
-      storage-node:
-        condition: service_healthy
     healthcheck:
-      # /readyz: "healthy" means the storage node behind it is reachable, so services
-      # that depend on the coordinator start only once storage actually works.
+      # /readyz: healthy once every shard has a primary, so services that depend on
+      # the coordinator start only once storage actually works.
       test: ["CMD", "/coordinator", "-healthcheck"]
       interval: 10s
       timeout: 3s
       retries: 3
-      start_period: 10s
+      start_period: 30s
       start_interval: 2s
 
+  storage-0-a:
+    <<: *storage-node
+    environment:
+      <<: *storage-env
+      NODE_ID: storage-0-a
+      SHARD_ID: "0"
+      ADVERTISE_URL: http://storage-0-a:8080
+      MONGO_URI: mongodb://mongo-0-a:27017
+    depends_on:
+      mongo-0-a: { condition: service_healthy }
+      coordinator: { condition: service_started }
+
+  storage-0-b:
+    <<: *storage-node
+    environment:
+      <<: *storage-env
+      NODE_ID: storage-0-b
+      SHARD_ID: "0"
+      ADVERTISE_URL: http://storage-0-b:8080
+      MONGO_URI: mongodb://mongo-0-b:27017
+    depends_on:
+      mongo-0-b: { condition: service_healthy }
+      coordinator: { condition: service_started }
+
+  storage-1-a:
+    <<: *storage-node
+    environment:
+      <<: *storage-env
+      NODE_ID: storage-1-a
+      SHARD_ID: "1"
+      ADVERTISE_URL: http://storage-1-a:8080
+      MONGO_URI: mongodb://mongo-1-a:27017
+    depends_on:
+      mongo-1-a: { condition: service_healthy }
+      coordinator: { condition: service_started }
+
+  storage-1-b:
+    <<: *storage-node
+    environment:
+      <<: *storage-env
+      NODE_ID: storage-1-b
+      SHARD_ID: "1"
+      ADVERTISE_URL: http://storage-1-b:8080
+      MONGO_URI: mongodb://mongo-1-b:27017
+    depends_on:
+      mongo-1-b: { condition: service_healthy }
+      coordinator: { condition: service_started }
+
+  storage-2-a:
+    <<: *storage-node
+    environment:
+      <<: *storage-env
+      NODE_ID: storage-2-a
+      SHARD_ID: "2"
+      ADVERTISE_URL: http://storage-2-a:8080
+      MONGO_URI: mongodb://mongo-2-a:27017
+    depends_on:
+      mongo-2-a: { condition: service_healthy }
+      coordinator: { condition: service_started }
+
+  storage-2-b:
+    <<: *storage-node
+    environment:
+      <<: *storage-env
+      NODE_ID: storage-2-b
+      SHARD_ID: "2"
+      ADVERTISE_URL: http://storage-2-b:8080
+      MONGO_URI: mongodb://mongo-2-b:27017
+    depends_on:
+      mongo-2-b: { condition: service_healthy }
+      coordinator: { condition: service_started }
+
+  mongo-0-a:
+    <<: *mongo
+    volumes: [mongo-0-a:/data/db]
+
+  mongo-0-b:
+    <<: *mongo
+    volumes: [mongo-0-b:/data/db]
+
+  mongo-1-a:
+    <<: *mongo
+    volumes: [mongo-1-a:/data/db]
+
+  mongo-1-b:
+    <<: *mongo
+    volumes: [mongo-1-b:/data/db]
+
+  mongo-2-a:
+    <<: *mongo
+    volumes: [mongo-2-a:/data/db]
+
+  mongo-2-b:
+    <<: *mongo
+    volumes: [mongo-2-b:/data/db]
+
 networks:
-  # Mongo + storage node only. "internal" = no route to the outside world.
+  # MongoDB instances + storage nodes only. "internal" = no route to the outside world.
   mongo:
     internal: true
-  # Storage node + coordinator (the application services will join the coordinator
+  # Storage nodes + coordinator (the application services will join the coordinator
   # on a separate network, so they can never reach a storage node directly).
   storage: {}
 
 volumes:
-  mongo-data: {}
+  mongo-0-a: {}
+  mongo-0-b: {}
+  mongo-1-a: {}
+  mongo-1-b: {}
+  mongo-2-a: {}
+  mongo-2-b: {}

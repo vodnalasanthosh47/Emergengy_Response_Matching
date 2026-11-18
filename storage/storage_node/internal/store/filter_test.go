@@ -63,6 +63,7 @@ func TestBuildFilter(t *testing.T) {
 			if err != nil {
 				t.Fatalf("BuildFilter() error = %v", err)
 			}
+			tt.want["deleted"] = bson.M{"$ne": true} // tombstones are never returned
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("BuildFilter() =\n  %v\nwant\n  %v", got, tt.want)
 			}

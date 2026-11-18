@@ -1,9 +1,10 @@
 // Package store defines how the coordinator reaches the storage tier.
 //
-// The HTTP handlers depend only on the RecordStore interface. CP1 provides one
-// implementation, Forwarder, which sends everything to a single storage node.
-// In CP2 a ring-routing implementation (key → shard across 3 nodes) replaces it
-// without any change to the handlers or to the coordinator's public contract.
+// The HTTP handlers depend only on the RecordStore interface, implemented by
+// ShardedStore: it routes each key to its shard (geohash of the key's homeCell),
+// writes through the shard's primary, replicates to the shard's replicas, and reads
+// from a replica when the primary is down. Forwarder is the HTTP client for one
+// storage node, and Pool keeps one Forwarder per node.
 package store
 
 import (

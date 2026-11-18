@@ -15,22 +15,20 @@ import (
 	"github.com/vodnalasanthosh47/Emergengy_Response_Matching/storage/coordinator/internal/model"
 )
 
-// Forwarder is the CP1 RecordStore: it relays every operation to one storage node
-// whose base URL comes from configuration (STORAGE_NODE_URL).
+// Forwarder is the HTTP client for one storage node (contracts/openapi/
+// storage-node-api.yaml). ShardedStore picks the node; the Forwarder only talks to it.
 type Forwarder struct {
 	baseURL string
 	client  *http.Client
 	timeout time.Duration
 }
 
-var _ RecordStore = (*Forwarder)(nil) // compile-time check that Forwarder implements RecordStore
-
 // NewForwarder creates a Forwarder. timeout bounds each call to the storage node.
 func NewForwarder(baseURL string, timeout time.Duration) *Forwarder {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	// Go's default keeps only 2 idle connections per host. All our traffic goes to one
-	// host, so allow more to be reused instead of opening a new TCP connection per call.
-	transport.MaxIdleConnsPerHost = 64
+	return newForwarder(baseURL, timeout, newTransport())
+}
+
+func newForwarder(baseURL string, timeout time.Duration, transport *http.Transport) *Forwarder {
 	return &Forwarder{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		// No client-level Timeout: each call gets a context deadline instead, which also
@@ -38,6 +36,14 @@ func NewForwarder(baseURL string, timeout time.Duration) *Forwarder {
 		client:  &http.Client{Transport: transport},
 		timeout: timeout,
 	}
+}
+
+func newTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// Go's default keeps only 2 idle connections per host. Allow more to be reused
+	// instead of opening a new TCP connection per call.
+	transport.MaxIdleConnsPerHost = 64
+	return transport
 }
 
 func (f *Forwarder) Get(ctx context.Context, key string) (model.Record, error) {
@@ -52,13 +58,74 @@ func (f *Forwarder) Put(ctx context.Context, key string, req model.PutRequest) (
 	return rec, status == http.StatusCreated, err
 }
 
-func (f *Forwarder) Delete(ctx context.Context, key string, expectedVersion *int64) error {
+// Delete returns the tombstone the node wrote, so that it can be replicated.
+func (f *Forwarder) Delete(ctx context.Context, key string, expectedVersion *int64) (model.Record, error) {
 	path := dataPath(key)
 	if expectedVersion != nil {
 		path += "?expectedVersion=" + strconv.FormatInt(*expectedVersion, 10)
 	}
-	_, err := f.do(ctx, http.MethodDelete, path, nil, nil)
-	return err
+	var tomb model.Record
+	_, err := f.do(ctx, http.MethodDelete, path, nil, &tomb)
+	return tomb, err
+}
+
+// ApplyReplica sends a copy of a primary's write. applied=false means the node
+// already holds a newer version, which is not an error.
+func (f *Forwarder) ApplyReplica(ctx context.Context, rec model.Record) (bool, error) {
+	var out struct {
+		Applied bool `json:"applied"`
+	}
+	_, err := f.do(ctx, http.MethodPut, "/internal/replica/"+url.PathEscape(rec.Key), rec, &out)
+	return out.Applied, err
+}
+
+// GetAny reads a record including tombstones.
+func (f *Forwarder) GetAny(ctx context.Context, key string) (model.Record, error) {
+	var rec model.Record
+	_, err := f.do(ctx, http.MethodGet, "/internal/replica/"+url.PathEscape(key), nil, &rec)
+	return rec, err
+}
+
+// Repair overwrites key with rec if the node still holds localVersion.
+func (f *Forwarder) Repair(ctx context.Context, rec model.Record, localVersion int64) (bool, error) {
+	var out struct {
+		Applied bool `json:"applied"`
+	}
+	path := "/internal/repair/" + url.PathEscape(rec.Key) + "?expectedLocalVersion=" + strconv.FormatInt(localVersion, 10)
+	_, err := f.do(ctx, http.MethodPut, path, rec, &out)
+	return out.Applied, err
+}
+
+// Purge removes key if the node still holds localVersion.
+func (f *Forwarder) Purge(ctx context.Context, key string, localVersion int64) (bool, error) {
+	var out struct {
+		Applied bool `json:"applied"`
+	}
+	path := "/internal/repair/" + url.PathEscape(key) + "?expectedLocalVersion=" + strconv.FormatInt(localVersion, 10)
+	_, err := f.do(ctx, http.MethodDelete, path, nil, &out)
+	return out.Applied, err
+}
+
+// Sync reads one page of the node's records changed after (since, afterKey).
+func (f *Forwarder) Sync(ctx context.Context, since time.Time, afterKey string, limit int) (model.SyncPage, error) {
+	q := url.Values{}
+	if !since.IsZero() {
+		q.Set("since", since.UTC().Format(time.RFC3339Nano))
+	}
+	if afterKey != "" {
+		q.Set("afterKey", afterKey)
+	}
+	q.Set("limit", strconv.Itoa(limit))
+	var page model.SyncPage
+	_, err := f.do(ctx, http.MethodGet, "/internal/sync?"+q.Encode(), nil, &page)
+	return page, err
+}
+
+// Stats reads the node's record counts.
+func (f *Forwarder) Stats(ctx context.Context) (model.Stats, error) {
+	var st model.Stats
+	_, err := f.do(ctx, http.MethodGet, "/internal/stats", nil, &st)
+	return st, err
 }
 
 func (f *Forwarder) Query(ctx context.Context, q model.QueryRequest) ([]model.Record, error) {

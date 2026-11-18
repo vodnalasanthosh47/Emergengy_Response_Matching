@@ -9,6 +9,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/vodnalasanthosh47/Emergengy_Response_Matching/storage/coordinator/internal/registry"
 )
 
 // Metrics holds the Prometheus metrics exposed on /metrics.
@@ -16,6 +18,7 @@ import (
 // It uses its own registry instead of the global default so that tests can create
 // as many instances as they like without "duplicate metrics collector" panics.
 type Metrics struct {
+	namespace      string
 	registry       *prometheus.Registry
 	requests       *prometheus.CounterVec
 	duration       *prometheus.HistogramVec
@@ -26,7 +29,8 @@ type Metrics struct {
 // NewMetrics creates the metrics with the given name prefix (e.g. "coordinator").
 func NewMetrics(namespace string) *Metrics {
 	m := &Metrics{
-		registry: prometheus.NewRegistry(),
+		namespace: namespace,
+		registry:  prometheus.NewRegistry(),
 		requests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "http_requests_total",
@@ -55,6 +59,32 @@ func NewMetrics(namespace string) *Metrics {
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
 	return m
+}
+
+// WatchCluster exports the cluster's state: nodes per state and the failover count.
+// The values are read from the registry on every scrape.
+func (m *Metrics) WatchCluster(nodes func() []registry.Node, failovers func() uint64) {
+	for _, state := range registry.States {
+		m.registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Namespace:   m.namespace,
+			Name:        "storage_nodes",
+			Help:        "Registered storage nodes by state.",
+			ConstLabels: prometheus.Labels{"state": string(state)},
+		}, func() float64 {
+			n := 0
+			for _, node := range nodes() {
+				if node.State == state {
+					n++
+				}
+			}
+			return float64(n)
+		}))
+	}
+	m.registry.MustRegister(prometheus.NewCounterFunc(prometheus.CounterOpts{
+		Namespace: m.namespace,
+		Name:      "failovers_total",
+		Help:      "Failed primaries replaced by promoting a replica.",
+	}, func() float64 { return float64(failovers()) }))
 }
 
 // Handler serves the metrics in Prometheus text format.
