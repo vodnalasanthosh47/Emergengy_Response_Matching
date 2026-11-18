@@ -12,7 +12,7 @@ import (
 //
 // Kept as a pure function (no database) so it can be unit-tested directly.
 func BuildFilter(q model.QueryRequest) (bson.M, error) {
-	filter := bson.M{"indexes.collection": q.Collection}
+	filter := bson.M{"indexes.collection": q.Collection, "deleted": notDeleted()}
 
 	// Empty and omitted geoCells both mean "any cell" (see the contract).
 	if len(q.GeoCells) > 0 {

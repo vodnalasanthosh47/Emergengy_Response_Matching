@@ -33,14 +33,23 @@ var (
 const collectionName = "records"
 
 // storedDoc is the shape of one document in the "records" collection:
-// { _id: key, value: {...}, indexes: {...}, version, updatedAt }.
+// { _id: key, value: {...}, indexes: {...}, version, updatedAt, deleted }.
+//
+// Deletes are stored as tombstones (deleted: true, empty value) rather than removed,
+// so that they replicate and sync to other nodes of the shard like any other write,
+// and so that a re-created key keeps counting versions up instead of restarting at 1.
 type storedDoc struct {
 	Key       string            `bson:"_id"`
 	Value     bson.Raw          `bson:"value"`
 	Indexes   map[string]string `bson:"indexes"`
 	Version   int64             `bson:"version"`
 	UpdatedAt time.Time         `bson:"updatedAt"`
+	Deleted   bool              `bson:"deleted,omitempty"`
 }
+
+// notDeleted matches live records: tombstones have deleted: true, live records have
+// deleted: false or no field at all (documents written before tombstones existed).
+func notDeleted() bson.M { return bson.M{"$ne": true} }
 
 // MongoStore stores records in a single MongoDB collection.
 type MongoStore struct {
@@ -61,6 +70,8 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 	for _, f := range fields {
 		models = append(models, mongo.IndexModel{Keys: bson.D{{Key: f, Value: 1}}})
 	}
+	// Recovery sync pages through records in (updatedAt, _id) order.
+	models = append(models, mongo.IndexModel{Keys: bson.D{{Key: "updatedAt", Value: 1}, {Key: "_id", Value: 1}}})
 	_, err := s.coll.Indexes().CreateMany(ctx, models)
 	return classify(err)
 }
@@ -70,10 +81,10 @@ func (s *MongoStore) Ping(ctx context.Context) error {
 	return classify(s.coll.Database().Client().Ping(ctx, nil))
 }
 
-// Get returns the record stored under key.
+// Get returns the live record stored under key. A tombstone counts as not found.
 func (s *MongoStore) Get(ctx context.Context, key string) (model.Record, error) {
 	var d storedDoc
-	err := s.coll.FindOne(ctx, bson.M{"_id": key}).Decode(&d)
+	err := s.coll.FindOne(ctx, bson.M{"_id": key, "deleted": notDeleted()}).Decode(&d)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return model.Record{}, ErrNotFound
 	}
@@ -91,9 +102,7 @@ func (s *MongoStore) Put(ctx context.Context, key string, req model.PutRequest) 
 	if err != nil {
 		return model.Record{}, false, err
 	}
-	// MongoDB dates have millisecond precision; truncating here means the value we
-	// return is identical to what a later read returns.
-	now := time.Now().UTC().Truncate(time.Millisecond)
+	now := now()
 
 	switch {
 	case req.ExpectedVersion == nil:
@@ -106,33 +115,39 @@ func (s *MongoStore) Put(ctx context.Context, key string, req model.PutRequest) 
 	}
 }
 
-// Delete removes the record under key. If expectedVersion is non-nil the record is
+// Delete turns the live record under key into a tombstone and returns the tombstone,
+// which the coordinator replicates. If expectedVersion is non-nil the record is
 // deleted only when its current version matches.
-func (s *MongoStore) Delete(ctx context.Context, key string, expectedVersion *int64) error {
-	filter := bson.M{"_id": key}
+func (s *MongoStore) Delete(ctx context.Context, key string, expectedVersion *int64) (model.Record, error) {
+	filter := bson.M{"_id": key, "deleted": notDeleted()}
 	if expectedVersion != nil {
 		filter["version"] = *expectedVersion
 	}
-	res, err := s.coll.DeleteOne(ctx, filter)
-	if err != nil {
-		return classify(err)
+	update := bson.M{
+		"$set": bson.M{"deleted": true, "value": bson.D{}, "updatedAt": now()},
+		"$inc": bson.M{"version": int64(1)},
 	}
-	if res.DeletedCount == 1 {
-		return nil
+	var d storedDoc
+	err := s.coll.FindOneAndUpdate(ctx, filter, update, options.FindOneAndUpdate().SetReturnDocument(options.After)).Decode(&d)
+	if err == nil {
+		return d.toRecord()
+	}
+	if !errors.Is(err, mongo.ErrNoDocuments) {
+		return model.Record{}, classify(err)
 	}
 	if expectedVersion == nil {
-		return ErrNotFound
+		return model.Record{}, ErrNotFound
 	}
 	// Nothing deleted under a conditional filter: either the key is missing or the
 	// version differs. Look again only to pick the right error.
 	exists, err := s.exists(ctx, key)
 	if err != nil {
-		return err
+		return model.Record{}, err
 	}
 	if exists {
-		return ErrVersionConflict
+		return model.Record{}, ErrVersionConflict
 	}
-	return ErrNotFound
+	return model.Record{}, ErrNotFound
 }
 
 // Query returns up to the query's limit of records matching it, sorted by key so
@@ -170,33 +185,42 @@ func (s *MongoStore) Query(ctx context.Context, q model.QueryRequest) ([]model.R
 	return records, nil
 }
 
-// upsert writes unconditionally: create with version 1, or replace and bump the version.
+// upsert writes unconditionally: create (or revive a tombstone), or replace and bump
+// the version.
 func (s *MongoStore) upsert(ctx context.Context, key string, value bson.Raw, indexes map[string]string, now time.Time) (model.Record, bool, error) {
-	opts := options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After)
+	// ReturnDocument(Before) tells us atomically whether a live record existed; the
+	// new record is fully determined by the update, so we build it ourselves.
+	opts := options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.Before)
 	update := writeUpdate(value, indexes, now)
 
 	// Two concurrent upserts of the same *new* key can both decide to insert; MongoDB
 	// lets one win and fails the other with a duplicate-key error. Retrying once is the
 	// documented fix: by then the document exists, so the retry becomes an update.
 	for attempt := 0; ; attempt++ {
-		var d storedDoc
-		err := s.coll.FindOneAndUpdate(ctx, bson.M{"_id": key}, update, opts).Decode(&d)
+		var before storedDoc
+		err := s.coll.FindOneAndUpdate(ctx, bson.M{"_id": key}, update, opts).Decode(&before)
 		if mongo.IsDuplicateKeyError(err) && attempt == 0 {
 			continue
 		}
-		if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) { // nothing before: inserted at version 1
+			before = storedDoc{Deleted: true}
+		} else if err != nil {
 			return model.Record{}, false, classify(err)
 		}
+		d := storedDoc{Key: key, Value: value, Indexes: indexes, Version: before.Version + 1, UpdatedAt: now}
 		rec, err := d.toRecord()
-		// $inc on a missing field starts it at 1, so version 1 means we just created it.
-		return rec, d.Version == 1, err
+		return rec, before.Deleted, err
 	}
 }
 
-// insert is the expectedVersion == 0 case: create only, fail if the key exists.
+// insert is the expectedVersion == 0 case: create only, fail if a live record exists.
+// The filter matches only a tombstone, so an existing tombstone is revived (keeping
+// its version count) and a missing key is inserted by the upsert; a live record makes
+// the upsert collide on _id.
 func (s *MongoStore) insert(ctx context.Context, key string, value bson.Raw, indexes map[string]string, now time.Time) (model.Record, bool, error) {
-	d := storedDoc{Key: key, Value: value, Indexes: indexes, Version: 1, UpdatedAt: now}
-	_, err := s.coll.InsertOne(ctx, d)
+	opts := options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After)
+	var d storedDoc
+	err := s.coll.FindOneAndUpdate(ctx, bson.M{"_id": key, "deleted": true}, writeUpdate(value, indexes, now), opts).Decode(&d)
 	if mongo.IsDuplicateKeyError(err) {
 		return model.Record{}, false, ErrVersionConflict
 	}
@@ -212,7 +236,7 @@ func (s *MongoStore) insert(ctx context.Context, key string, value bson.Raw, ind
 // holding the same version can never both succeed: exactly one matches the filter.
 func (s *MongoStore) compareAndSet(ctx context.Context, key string, expected int64, value bson.Raw, indexes map[string]string, now time.Time) (model.Record, error) {
 	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
-	filter := bson.M{"_id": key, "version": expected}
+	filter := bson.M{"_id": key, "version": expected, "deleted": notDeleted()}
 
 	var d storedDoc
 	err := s.coll.FindOneAndUpdate(ctx, filter, writeUpdate(value, indexes, now), opts).Decode(&d)
@@ -235,7 +259,7 @@ func (s *MongoStore) compareAndSet(ctx context.Context, key string, expected int
 }
 
 func (s *MongoStore) exists(ctx context.Context, key string) (bool, error) {
-	n, err := s.coll.CountDocuments(ctx, bson.M{"_id": key}, options.Count().SetLimit(1))
+	n, err := s.coll.CountDocuments(ctx, bson.M{"_id": key, "deleted": notDeleted()}, options.Count().SetLimit(1))
 	if err != nil {
 		return false, classify(err)
 	}
@@ -246,9 +270,15 @@ func (s *MongoStore) exists(ctx context.Context, key string) (bool, error) {
 // value and indexes, stamp the time, and atomically increment the version.
 func writeUpdate(value bson.Raw, indexes map[string]string, now time.Time) bson.M {
 	return bson.M{
-		"$set": bson.M{"value": value, "indexes": indexes, "updatedAt": now},
+		"$set": bson.M{"value": value, "indexes": indexes, "updatedAt": now, "deleted": false},
 		"$inc": bson.M{"version": int64(1)},
 	}
+}
+
+// now is the timestamp for a write. MongoDB dates have millisecond precision;
+// truncating here means the value we return is identical to what a later read returns.
+func now() time.Time {
+	return time.Now().UTC().Truncate(time.Millisecond)
 }
 
 func (d storedDoc) toRecord() (model.Record, error) {
@@ -262,6 +292,7 @@ func (d storedDoc) toRecord() (model.Record, error) {
 		Indexes:   d.Indexes,
 		Version:   d.Version,
 		UpdatedAt: d.UpdatedAt.UTC(),
+		Deleted:   d.Deleted,
 	}, nil
 }
 

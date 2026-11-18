@@ -20,6 +20,9 @@ Each storage-node pod runs a **standalone** `mongod`:
 
 Only the storage-node process talks to it.
 
+- **Version:** MongoDB 7.0. MongoDB 8.x refuses to start on Linux kernels
+  6.19.0–7.0.13 (SERVER-121912, a TCMalloc/rseq crash), which includes our
+  development machines. We use no 8.x features.
 - **Do not use Mongo's distributed features.** MongoDB replica sets and sharded clusters
   are **not** used.
 - **Document shape:** one collection `records` holding

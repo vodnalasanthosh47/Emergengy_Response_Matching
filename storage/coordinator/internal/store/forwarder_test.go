@@ -15,6 +15,8 @@ import (
 
 func ptr(v int64) *int64 { return &v }
 
+const tombJSON = `{"key":"request:1","value":{},"indexes":{"collection":"request"},"version":5,"updatedAt":"2026-11-14T06:53:00Z","deleted":true}`
+
 const recordJSON = `{"key":"request:1","value":{"a":1},"indexes":{"collection":"request"},"version":2,"updatedAt":"2026-11-14T06:53:00Z"}`
 
 // fakeNode starts an httptest.Server that answers every request with status and body.
@@ -131,9 +133,10 @@ func TestForwarderBuildsRequests(t *testing.T) {
 	})
 
 	t.Run("conditional delete uses query parameter", func(t *testing.T) {
-		srv, got := capturingNode(t, 204, "")
-		if err := NewForwarder(srv.URL, time.Second).Delete(ctx, "request:1", ptr(4)); err != nil {
-			t.Fatal(err)
+		srv, got := capturingNode(t, 200, tombJSON)
+		tomb, err := NewForwarder(srv.URL, time.Second).Delete(ctx, "request:1", ptr(4))
+		if err != nil || !tomb.Deleted || tomb.Version != 5 {
+			t.Fatalf("Delete = %+v, %v; want the tombstone", tomb, err)
 		}
 		if got.method != "DELETE" || got.path != "/internal/data/request:1" || got.query != "expectedVersion=4" {
 			t.Errorf("got %s %s?%s", got.method, got.path, got.query)
@@ -141,8 +144,8 @@ func TestForwarderBuildsRequests(t *testing.T) {
 	})
 
 	t.Run("unconditional delete has no query", func(t *testing.T) {
-		srv, got := capturingNode(t, 204, "")
-		_ = NewForwarder(srv.URL, time.Second).Delete(ctx, "request:1", nil)
+		srv, got := capturingNode(t, 200, tombJSON)
+		_, _ = NewForwarder(srv.URL, time.Second).Delete(ctx, "request:1", nil)
 		if got.query != "" {
 			t.Errorf("query = %q, want empty", got.query)
 		}

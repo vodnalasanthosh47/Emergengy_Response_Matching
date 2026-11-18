@@ -25,6 +25,11 @@ type fakeStore struct {
 	gotPut    model.PutRequest
 	gotDelete *int64
 	gotQuery  model.QueryRequest
+
+	gotReplica model.Record
+	gotLocal   int64
+	gotSince   time.Time
+	gotLimit   int
 }
 
 var sampleRecord = model.Record{
@@ -43,9 +48,34 @@ func (f *fakeStore) Put(_ context.Context, key string, req model.PutRequest) (mo
 	f.gotKey, f.gotPut = key, req
 	return sampleRecord, f.created, f.err
 }
-func (f *fakeStore) Delete(_ context.Context, key string, ev *int64) error {
+func (f *fakeStore) Delete(_ context.Context, key string, ev *int64) (model.Record, error) {
 	f.gotKey, f.gotDelete = key, ev
-	return f.err
+	tomb := sampleRecord
+	tomb.Deleted = true
+	return tomb, f.err
+}
+func (f *fakeStore) ApplyReplica(_ context.Context, rec model.Record) (bool, error) {
+	f.gotKey, f.gotReplica = rec.Key, rec
+	return true, f.err
+}
+func (f *fakeStore) Repair(_ context.Context, rec model.Record, local int64) (bool, error) {
+	f.gotKey, f.gotReplica, f.gotLocal = rec.Key, rec, local
+	return true, f.err
+}
+func (f *fakeStore) Purge(_ context.Context, key string, local int64) (bool, error) {
+	f.gotKey, f.gotLocal = key, local
+	return true, f.err
+}
+func (f *fakeStore) GetAny(_ context.Context, key string) (model.Record, error) {
+	f.gotKey = key
+	return sampleRecord, f.err
+}
+func (f *fakeStore) Since(_ context.Context, since time.Time, afterKey string, limit int) (model.SyncPage, error) {
+	f.gotSince, f.gotKey, f.gotLimit = since, afterKey, limit
+	return model.SyncPage{Records: []model.Record{sampleRecord}}, f.err
+}
+func (f *fakeStore) Stats(context.Context) (model.Stats, error) {
+	return model.Stats{Records: 4}, f.err
 }
 func (f *fakeStore) Query(_ context.Context, q model.QueryRequest) ([]model.Record, error) {
 	f.gotQuery = q
@@ -54,6 +84,8 @@ func (f *fakeStore) Query(_ context.Context, q model.QueryRequest) ([]model.Reco
 func (f *fakeStore) Ping(context.Context) error { return f.err }
 
 const validPut = `{"value":{"a":1},"indexes":{"collection":"request"}}`
+
+const validReplica = `{"key":"request:1","value":{"a":1},"indexes":{"collection":"request"},"version":3,"updatedAt":"2026-11-14T06:53:00Z"}`
 
 func TestHandlers(t *testing.T) {
 	tests := []struct {
@@ -87,8 +119,8 @@ func TestHandlers(t *testing.T) {
 		{"put body too large", "PUT", "/internal/data/request:1",
 			`{"value":{"x":"` + strings.Repeat("a", maxBodyBytes) + `"},"indexes":{"collection":"r"}}`, nil, false, 400, codeInvalidRequest},
 
-		{"delete ok", "DELETE", "/internal/data/request:1", "", nil, false, 204, ""},
-		{"delete conditional ok", "DELETE", "/internal/data/request:1?expectedVersion=3", "", nil, false, 204, ""},
+		{"delete ok returns tombstone", "DELETE", "/internal/data/request:1", "", nil, false, 200, ""},
+		{"delete conditional ok", "DELETE", "/internal/data/request:1?expectedVersion=3", "", nil, false, 200, ""},
 		{"delete bad version", "DELETE", "/internal/data/request:1?expectedVersion=0", "", nil, false, 400, codeInvalidRequest},
 		{"delete non-numeric version", "DELETE", "/internal/data/request:1?expectedVersion=x", "", nil, false, 400, codeInvalidRequest},
 		{"delete conflict", "DELETE", "/internal/data/request:1?expectedVersion=3", "", store.ErrVersionConflict, false, 409, codeVersionConflict},
@@ -98,6 +130,20 @@ func TestHandlers(t *testing.T) {
 		{"query injection attempt", "POST", "/internal/query", `{"collection":"r","match":{"$where":"1"}}`, nil, false, 400, codeInvalidRequest},
 		{"query mongo down", "POST", "/internal/query", `{"collection":"r"}`, store.ErrUnavailable, false, 503, codeStorageUnavailable},
 
+		{"replica ok", "PUT", "/internal/replica/request:1", validReplica, nil, false, 200, ""},
+		{"replica tombstone", "PUT", "/internal/replica/request:1", `{"key":"request:1","version":4,"updatedAt":"2026-11-14T06:53:00Z","deleted":true}`, nil, false, 200, ""},
+		{"replica key mismatch", "PUT", "/internal/replica/request:2", validReplica, nil, false, 400, codeInvalidRequest},
+		{"replica no version", "PUT", "/internal/replica/request:1", `{"key":"request:1","value":{},"indexes":{},"updatedAt":"2026-11-14T06:53:00Z"}`, nil, false, 400, codeInvalidRequest},
+		{"replica mongo down", "PUT", "/internal/replica/request:1", validReplica, store.ErrUnavailable, false, 503, codeStorageUnavailable},
+		{"get any", "GET", "/internal/replica/request:1", "", nil, false, 200, ""},
+		{"repair ok", "PUT", "/internal/repair/request:1?expectedLocalVersion=2", validReplica, nil, false, 200, ""},
+		{"repair needs local version", "PUT", "/internal/repair/request:1", validReplica, nil, false, 400, codeInvalidRequest},
+		{"purge ok", "DELETE", "/internal/repair/request:1?expectedLocalVersion=2", "", nil, false, 200, ""},
+		{"sync ok", "GET", "/internal/sync?since=2026-11-14T06:53:00.5Z&afterKey=request:1&limit=10", "", nil, false, 200, ""},
+		{"sync bad since", "GET", "/internal/sync?since=yesterday", "", nil, false, 400, codeInvalidRequest},
+		{"sync bad limit", "GET", "/internal/sync?limit=0", "", nil, false, 400, codeInvalidRequest},
+		{"stats ok", "GET", "/internal/stats", "", nil, false, 200, ""},
+
 		{"healthz ignores mongo", "GET", "/healthz", "", store.ErrUnavailable, false, 200, ""},
 		{"readyz ok", "GET", "/readyz", "", nil, false, 200, ""},
 		{"readyz mongo down", "GET", "/readyz", "", store.ErrUnavailable, false, 503, codeStorageUnavailable},
@@ -106,7 +152,7 @@ func TestHandlers(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fs := &fakeStore{err: tt.storeErr, created: tt.created}
-			h := NewHandler(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), NewMetrics("test"), time.Second)
+			h := NewHandler(fs, Identity{NodeID: "n1", ShardID: 1}, slog.New(slog.NewTextHandler(io.Discard, nil)), NewMetrics("test"), time.Second)
 
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
 			rr := httptest.NewRecorder()
@@ -135,7 +181,7 @@ func TestPutPassesExpectedVersionThrough(t *testing.T) {
 		{`{"value":{},"indexes":{"collection":"r"},"expectedVersion":7}`, "7"},
 	} {
 		fs := &fakeStore{}
-		h := NewHandler(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), NewMetrics("test"), time.Second)
+		h := NewHandler(fs, Identity{NodeID: "n1", ShardID: 1}, slog.New(slog.NewTextHandler(io.Discard, nil)), NewMetrics("test"), time.Second)
 		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("PUT", "/internal/data/resource:tdr1yz:x", strings.NewReader(tc.body)))
 
 		got := "<nil>"
@@ -150,7 +196,7 @@ func TestPutPassesExpectedVersionThrough(t *testing.T) {
 
 func TestMetricsEndpointCountsConflicts(t *testing.T) {
 	fs := &fakeStore{err: store.ErrVersionConflict}
-	h := NewHandler(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), NewMetrics("storage_node"), time.Second)
+	h := NewHandler(fs, Identity{NodeID: "n1", ShardID: 1}, slog.New(slog.NewTextHandler(io.Discard, nil)), NewMetrics("storage_node"), time.Second)
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("PUT", "/internal/data/request:1", strings.NewReader(validPut)))
 
 	rr := httptest.NewRecorder()
@@ -166,5 +212,34 @@ func TestMetricsEndpointCountsConflicts(t *testing.T) {
 	}
 	if rr.Code != http.StatusOK {
 		t.Errorf("/metrics status = %d", rr.Code)
+	}
+}
+
+func TestReplicaEndpointsPassArgumentsThrough(t *testing.T) {
+	fs := &fakeStore{}
+	h := NewHandler(fs, Identity{NodeID: "n1", ShardID: 1}, slog.New(slog.NewTextHandler(io.Discard, nil)), NewMetrics("test"), time.Second)
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("PUT", "/internal/repair/request:1?expectedLocalVersion=5", strings.NewReader(validReplica)))
+	if fs.gotReplica.Version != 3 || fs.gotLocal != 5 {
+		t.Errorf("repair got version %d local %d, want 3 / 5", fs.gotReplica.Version, fs.gotLocal)
+	}
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/internal/sync?since=2026-11-14T06:53:00.5Z&afterKey=request:9&limit=7", nil))
+	if !fs.gotSince.Equal(time.Date(2026, 11, 14, 6, 53, 0, 5e8, time.UTC)) || fs.gotKey != "request:9" || fs.gotLimit != 7 {
+		t.Errorf("sync got since %v afterKey %q limit %d", fs.gotSince, fs.gotKey, fs.gotLimit)
+	}
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/internal/stats", nil))
+	var st model.Stats
+	if err := json.Unmarshal(rr.Body.Bytes(), &st); err != nil || st.NodeID != "n1" || st.ShardID != 1 || st.Records != 4 {
+		t.Errorf("stats = %s", rr.Body)
+	}
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("DELETE", "/internal/data/request:1", nil))
+	var tomb model.Record
+	if err := json.Unmarshal(rr.Body.Bytes(), &tomb); err != nil || !tomb.Deleted {
+		t.Errorf("delete body = %s, want the tombstone", rr.Body)
 	}
 }

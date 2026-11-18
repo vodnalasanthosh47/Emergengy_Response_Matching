@@ -22,8 +22,9 @@ const (
 )
 
 var (
-	// Keys look like "request:{uuid}" or "resource:{geoCell}:{uuid}". Forbidding "/"
-	// keeps a key a single URL path segment.
+	// Keys look like "{collection}:{homeCell}:{uuid}": the coordinator shards on the
+	// homeCell geohash (internal/routing). Forbidding "/" keeps a key a single URL
+	// path segment.
 	keyPattern = regexp.MustCompile(`^[A-Za-z0-9:_-]{1,256}$`)
 
 	// Index attribute names become MongoDB field paths ("indexes.<name>"), so they must
@@ -38,6 +39,34 @@ type Record struct {
 	Indexes   map[string]string `json:"indexes"`
 	Version   int64             `json:"version"`
 	UpdatedAt time.Time         `json:"updatedAt"`
+	// Deleted marks a tombstone. Only the replica and sync APIs between the
+	// coordinator and storage nodes carry tombstones; services never see one.
+	Deleted bool `json:"deleted,omitempty"`
+}
+
+// SyncPage is one page of a storage node's GET /internal/sync.
+type SyncPage struct {
+	Records   []Record  `json:"records"`
+	More      bool      `json:"more"`
+	NextSince time.Time `json:"nextSince"`
+	NextKey   string    `json:"nextKey"`
+}
+
+// Stats is a storage node's GET /internal/stats.
+type Stats struct {
+	NodeID       string    `json:"nodeId"`
+	ShardID      int       `json:"shardId"`
+	Records      int64     `json:"records"`
+	Tombstones   int64     `json:"tombstones"`
+	MaxUpdatedAt time.Time `json:"maxUpdatedAt"`
+}
+
+// NodeInfo is the body of POST /internal/nodes/register and /internal/nodes/heartbeat.
+type NodeInfo struct {
+	NodeID       string    `json:"nodeId"`
+	ShardID      int       `json:"shardId"`
+	URL          string    `json:"url"`
+	MaxUpdatedAt time.Time `json:"maxUpdatedAt"`
 }
 
 // PutRequest is the body of PUT /internal/data/{key}.

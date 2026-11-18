@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,6 +19,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/vodnalasanthosh47/Emergengy_Response_Matching/storage/storage_node/internal/api"
+	"github.com/vodnalasanthosh47/Emergengy_Response_Matching/storage/storage_node/internal/heartbeat"
 	"github.com/vodnalasanthosh47/Emergengy_Response_Matching/storage/storage_node/internal/store"
 )
 
@@ -26,17 +28,17 @@ func main() {
 	// for the Docker HEALTHCHECK: `storage-node -healthcheck`.
 	healthcheck := flag.Bool("healthcheck", false, "probe /readyz of the local server and exit 0 if ready, 1 otherwise")
 	flag.Parse()
+	if *healthcheck {
+		os.Exit(probe(getenv("SERVER_PORT", "8080")))
+	}
 
 	cfg, err := loadConfig()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		os.Exit(1)
 	}
-	if *healthcheck {
-		os.Exit(probe(cfg.Port))
-	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("component", "storage-node", "node_id", cfg.NodeID)
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("component", "storage-node", "node_id", cfg.NodeID, "shard_id", cfg.ShardID)
 	if err := run(cfg, logger); err != nil {
 		logger.Error("fatal", "err", err)
 		os.Exit(1)
@@ -68,7 +70,7 @@ func run(cfg config, logger *slog.Logger) error {
 
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,
-		Handler: api.NewHandler(st, logger, api.NewMetrics("storage_node"), cfg.MongoTimeout),
+		Handler: api.NewHandler(st, api.Identity{NodeID: cfg.NodeID, ShardID: cfg.ShardID}, logger, api.NewMetrics("storage_node"), cfg.MongoTimeout),
 		// Timeouts protect the server from slow or stuck clients holding connections open.
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
@@ -76,13 +78,35 @@ func run(cfg config, logger *slog.Logger) error {
 		IdleTimeout:       60 * time.Second,
 	}
 
+	// Bind before registering: the coordinator may call us (replication, recovery
+	// sync) the moment it knows about us.
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
 	serveErr := make(chan error, 1)
 	go func() {
 		logger.Info("listening", "addr", srv.Addr, "mongo_db", cfg.MongoDB)
-		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- err
 		}
 	}()
+
+	hb := &heartbeat.Client{
+		CoordinatorURL: cfg.CoordinatorURL,
+		NodeID:         cfg.NodeID,
+		ShardID:        cfg.ShardID,
+		URL:            cfg.AdvertiseURL,
+		Interval:       cfg.HeartbeatInterval,
+		MaxUpdatedAt: func(ctx context.Context) (time.Time, error) {
+			mctx, cancel := context.WithTimeout(ctx, cfg.MongoTimeout)
+			defer cancel()
+			return st.MaxUpdatedAt(mctx)
+		},
+		HTTP: &http.Client{},
+		Log:  logger,
+	}
+	go hb.Run(ctx)
 
 	select {
 	case err := <-serveErr:

@@ -13,8 +13,22 @@ Client → Gateway → Request Service → RabbitMQ → Matching Service → Coo
 | Part | State |
 |---|---|
 | Contracts: coordinator + storage-node APIs (`contracts/openapi/`) | done |
-| Storage tier: coordinator + 1 storage node on MongoDB (`storage/`) | done |
+| Storage tier: coordinator + **3 shards × (primary + replica)** on MongoDB (`storage/`) | done |
+| Geohash sharding, replicated writes, heartbeats, failover, recovery sync | done |
+| Storage tier on Kubernetes (`deploy/k8s/storage/`) | done |
 | Java services (request, resource, matching), RabbitMQ, nginx gateway | next |
+
+### Storage tier against the problem statement
+
+| PDF requirement | Where |
+|---|---|
+| §2/§4: 1 coordinator, 3 shards, ≥1 replica per shard | Compose: `storage-{0,1,2}-{a,b}`. Kubernetes: one StatefulSet per shard, 2 pods each |
+| §4: the coordinator picks the shard by hash; the client doesn't know the location | `crc32(homeCell) mod 3` (`storage/coordinator/internal/routing`) |
+| §6: register, heartbeat and data internal APIs | `contracts/openapi/` |
+| §8: detect failed nodes, stop routing to them | 3 missed heartbeats → DOWN (`internal/registry`) |
+| §8: use a replica / keep processing | Reads fall back to a replica; the replica is promoted to primary |
+| §8: sync a recovered node | `internal/replication` (copy pass, then repair pass) |
+| §10/§11: distribution, failure, recovery demo and tests | `make storage-failover` (Compose); `MODE=k8s` (pod deletion) |
 
 ## Prerequisites
 
@@ -23,16 +37,28 @@ Client → Gateway → Request Service → RabbitMQ → Matching Service → Coo
 - **Docker** with Compose v2.20+ (for `up --wait`). The Go integration tests also use
   Docker, via testcontainers.
 - JDK 21 + Maven (Java services, coming next). `curl` and `jq` for the smoke test.
-- Laptop: about 1 GB free RAM for the storage tier (MongoDB is capped at 512 MB).
+- Laptop: about 2.5 GB free RAM for the storage tier (6 MongoDB instances, each capped at 384 MB).
+- MongoDB **7.0** is used everywhere: MongoDB 8 refuses to start on Linux kernels
+  6.19.0–7.0.13 (SERVER-121912).
 
 ## Quickstart (storage tier)
 
 ```bash
-make test           # go vet + go test -race (starts a throwaway MongoDB container)
-make images         # build images tagged <git-sha> and local
-make up-dev         # start mongo, storage-node, coordinator; coordinator on 127.0.0.1:9090
-make storage-smoke  # end-to-end checks through the coordinator
-make down           # stop (data kept);  make clean  also deletes the data volume
+make test              # go vet + go test -race (starts a throwaway MongoDB container)
+make images            # build images tagged <git-sha> and local
+make up-dev            # coordinator + 3 shards × 2 nodes (+ their MongoDBs); coordinator on 127.0.0.1:9090
+make topology          # shards, primaries, node states, record counts
+make storage-smoke     # data API checks through the coordinator
+make storage-failover  # distribution, then stop a primary, keep working, restart it, verify sync
+make down              # stop (data kept);  make clean  also deletes the data volumes
+```
+
+Kubernetes (Minikube):
+
+```bash
+make k8s-images && make k8s-up
+kubectl -n emergency port-forward svc/coordinator 9091:8080 &
+MODE=k8s BASE_URL=http://localhost:9091 tests/e2e/storage-failover.sh   # kills pods instead of containers
 ```
 
 Run `make help` for all targets.
@@ -41,10 +67,11 @@ Run `make help` for all targets.
 
 ```
 contracts/openapi/     language-neutral API contracts (the source of truth between Go and Java)
-storage/coordinator/   Go — the only entry point to storage; routes to storage nodes
-storage/storage_node/  Go — one shard's records in a standalone MongoDB
+storage/coordinator/   Go — the only entry point to storage: sharding, replication, failover, recovery
+storage/storage_node/  Go — one copy of one shard's records in a standalone MongoDB
 services/              Java / Spring Boot application services (next)
-deploy/compose/        CP1 Docker Compose runtime
+deploy/compose/        Docker Compose runtime
+deploy/k8s/storage/    Kubernetes manifests for the storage tier
 tests/e2e/             smoke tests
 docs/adr/              architecture decision records
 ```

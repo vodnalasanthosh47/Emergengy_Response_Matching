@@ -22,8 +22,8 @@ const (
 )
 
 var (
-	// Keys look like "request:{uuid}" or "resource:{geoCell}:{uuid}". Forbidding "/"
-	// keeps a key a single URL path segment.
+	// Keys look like "{collection}:{homeCell}:{uuid}" (the coordinator shards on the
+	// homeCell geohash). Forbidding "/" keeps a key a single URL path segment.
 	keyPattern = regexp.MustCompile(`^[A-Za-z0-9:_-]{1,256}$`)
 
 	// Index attribute names become MongoDB field paths ("indexes.<name>"), so they must
@@ -38,6 +38,55 @@ type Record struct {
 	Indexes   map[string]string `json:"indexes"`
 	Version   int64             `json:"version"`
 	UpdatedAt time.Time         `json:"updatedAt"`
+	// Deleted marks a tombstone. Tombstones never appear on the data API; they travel
+	// only on the replica and sync APIs so that deletes replicate like any other write.
+	Deleted bool `json:"deleted,omitempty"`
+}
+
+// Validate checks a record received on the replica API (a copy of a primary's write).
+func (r Record) Validate() error {
+	if err := ValidateKey(r.Key); err != nil {
+		return err
+	}
+	if r.Version < 1 {
+		return errors.New("version must be >= 1")
+	}
+	if r.UpdatedAt.IsZero() {
+		return errors.New("updatedAt is required")
+	}
+	if r.Deleted {
+		return nil // a tombstone carries no value
+	}
+	if v := bytes.TrimSpace(r.Value); len(v) == 0 || v[0] != '{' {
+		return errors.New("value must be a JSON object")
+	}
+	return validateIndexNames("indexes", r.Indexes)
+}
+
+// SyncPage is the body returned by GET /internal/sync: records (tombstones included)
+// ordered by (updatedAt, key). Pass NextSince/NextKey back to get the following page.
+type SyncPage struct {
+	Records   []Record  `json:"records"`
+	More      bool      `json:"more"`
+	NextSince time.Time `json:"nextSince"`
+	NextKey   string    `json:"nextKey"`
+}
+
+// Stats is the body returned by GET /internal/stats.
+type Stats struct {
+	NodeID       string    `json:"nodeId"`
+	ShardID      int       `json:"shardId"`
+	Records      int64     `json:"records"` // live records, tombstones excluded
+	Tombstones   int64     `json:"tombstones"`
+	MaxUpdatedAt time.Time `json:"maxUpdatedAt"`
+}
+
+// NodeInfo is what a node sends to POST /internal/nodes/register and /heartbeat.
+type NodeInfo struct {
+	NodeID       string    `json:"nodeId"`
+	ShardID      int       `json:"shardId"`
+	URL          string    `json:"url"`
+	MaxUpdatedAt time.Time `json:"maxUpdatedAt"`
 }
 
 // PutRequest is the body of PUT /internal/data/{key}.

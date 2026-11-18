@@ -26,8 +26,10 @@ import (
 	"github.com/vodnalasanthosh47/Emergengy_Response_Matching/storage/storage_node/internal/model"
 )
 
-// Same major version as deploy/compose/docker-compose.yml.
-const mongoImage = "mongo:8.0"
+// Same version as deploy/compose/docker-compose.yml. Not 8.0: MongoDB 8.x refuses to
+// start on Linux kernels 6.19.0–7.0.13 (SERVER-121912, a TCMalloc/rseq crash), and we
+// use only features 7.0 has.
+const mongoImage = "mongo:7.0"
 
 var (
 	testClient *mongo.Client
@@ -185,21 +187,25 @@ func TestCompareAndSet(t *testing.T) {
 func TestDelete(t *testing.T) {
 	s, ctx := newTestStore(t), testCtx(t)
 
-	if err := s.Delete(ctx, "request:nope", nil); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Delete(ctx, "request:nope", nil); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Delete missing = %v, want ErrNotFound", err)
 	}
-	if err := s.Delete(ctx, "request:nope", ptr(1)); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Delete(ctx, "request:nope", ptr(1)); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("conditional Delete missing = %v, want ErrNotFound", err)
 	}
 
 	if _, _, err := s.Put(ctx, "request:d", putReq(`{}`, nil)); err != nil {
 		t.Fatalf("seed Put: %v", err)
 	}
-	if err := s.Delete(ctx, "request:d", ptr(2)); !errors.Is(err, ErrVersionConflict) {
+	if _, err := s.Delete(ctx, "request:d", ptr(2)); !errors.Is(err, ErrVersionConflict) {
 		t.Fatalf("Delete with wrong version = %v, want ErrVersionConflict", err)
 	}
-	if err := s.Delete(ctx, "request:d", ptr(1)); err != nil {
-		t.Fatalf("Delete with right version = %v, want nil", err)
+	tomb, err := s.Delete(ctx, "request:d", ptr(1))
+	if err != nil || !tomb.Deleted || tomb.Version != 2 {
+		t.Fatalf("Delete with right version = (%+v, %v), want a version-2 tombstone", tomb, err)
+	}
+	if _, err := s.Delete(ctx, "request:d", nil); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Delete of a tombstone = %v, want ErrNotFound", err)
 	}
 	if _, err := s.Get(ctx, "request:d"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Get after delete = %v, want ErrNotFound", err)
@@ -320,8 +326,8 @@ func TestEnsureIndexesIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSpecifications: %v", err)
 	}
-	if len(specs) != 5 { // _id + our four
-		t.Errorf("got %d indexes, want 5", len(specs))
+	if len(specs) != 6 { // _id + four attribute indexes + (updatedAt, _id) for sync
+		t.Errorf("got %d indexes, want 6", len(specs))
 	}
 }
 

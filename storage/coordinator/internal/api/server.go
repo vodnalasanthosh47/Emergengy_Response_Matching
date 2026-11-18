@@ -1,9 +1,10 @@
 // Package api exposes the coordinator data API (contracts/openapi/coordinator-api.yaml),
 // the application services' only entry point to storage.
 //
-// Handlers know nothing about storage nodes: they validate input, call the
-// RecordStore, and map its errors to status codes. That is why sharding (CP2) and
-// replication (CP3) will not change this package.
+// The data handlers know nothing about storage nodes: they validate input, call the
+// RecordStore, and map its errors to status codes. Sharding and replication live
+// behind that interface. cluster.go adds the endpoints storage nodes call
+// (registration, heartbeat) and the topology view.
 package api
 
 import (
@@ -21,6 +22,7 @@ import (
 
 type server struct {
 	store   store.RecordStore
+	cluster Cluster
 	log     *slog.Logger
 	metrics *Metrics
 	// readyTimeout bounds the /readyz check; data calls are bounded by the RecordStore.
@@ -28,8 +30,8 @@ type server struct {
 }
 
 // NewHandler builds the HTTP routes.
-func NewHandler(st store.RecordStore, log *slog.Logger, metrics *Metrics, readyTimeout time.Duration) http.Handler {
-	s := &server{store: st, log: log, metrics: metrics, readyTimeout: readyTimeout}
+func NewHandler(st store.RecordStore, cluster Cluster, log *slog.Logger, metrics *Metrics, readyTimeout time.Duration) http.Handler {
+	s := &server{store: st, cluster: cluster, log: log, metrics: metrics, readyTimeout: readyTimeout}
 	mux := http.NewServeMux()
 
 	handle := func(pattern string, h http.HandlerFunc) {
@@ -39,6 +41,9 @@ func NewHandler(st store.RecordStore, log *slog.Logger, metrics *Metrics, readyT
 	handle("PUT /v1/data/{key}", s.putRecord)
 	handle("DELETE /v1/data/{key}", s.deleteRecord)
 	handle("POST /v1/query", s.query)
+	handle("POST /internal/nodes/register", s.registerNode)
+	handle("POST /internal/nodes/heartbeat", s.heartbeat)
+	handle("GET /internal/topology", s.topology)
 	handle("GET /healthz", s.healthz)
 	handle("GET /readyz", s.readyz)
 	mux.Handle("GET /metrics", metrics.Handler())

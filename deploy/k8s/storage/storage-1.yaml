@@ -1,0 +1,76 @@
+# Shard 1: two storage-node pods (storage-1-0, storage-1-1), one becomes primary and the
+# other its replica (roles are decided by the coordinator, not by pod ordinal). Each
+# pod runs MongoDB as a sidecar on its own persistent volume, so a restarted pod
+# keeps its data and only syncs what it missed.
+apiVersion: v1
+kind: Service
+metadata:
+  name: storage-1
+  namespace: emergency
+  labels: { app.kubernetes.io/name: storage-node, emergency/shard: "1" }
+spec:
+  clusterIP: None # headless: stable per-pod DNS names, storage-1-N.storage-1
+  publishNotReadyAddresses: true
+  selector: { app.kubernetes.io/name: storage-node, emergency/shard: "1" }
+  ports: [{ name: http, port: 8080, targetPort: http }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: storage-1
+  namespace: emergency
+  labels: { app.kubernetes.io/name: storage-node, emergency/shard: "1", app.kubernetes.io/part-of: emergency }
+spec:
+  serviceName: storage-1
+  replicas: 2 # primary + 1 replica (spec §2: at least one replica per shard)
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: { app.kubernetes.io/name: storage-node, emergency/shard: "1" }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: storage-node, emergency/shard: "1", app.kubernetes.io/part-of: emergency }
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: storage-node
+          image: emergency/storage-node:local
+          imagePullPolicy: IfNotPresent
+          ports: [{ name: http, containerPort: 8080 }]
+          env:
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: NODE_ID, value: "$(POD_NAME)" }
+            - { name: SHARD_ID, value: "1" }
+            - { name: ADVERTISE_URL, value: "http://$(POD_NAME).storage-1.emergency.svc.cluster.local:8080" }
+            - { name: COORDINATOR_URL, value: "http://coordinator.emergency.svc.cluster.local:8080" }
+            - { name: HEARTBEAT_INTERVAL, value: 5s }
+            - { name: MONGO_URI, value: "mongodb://localhost:27017" } # the sidecar
+            - { name: MONGO_DB, value: storage }
+            - { name: GOMEMLIMIT, value: 48MiB }
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { memory: 64Mi }
+        - name: mongo
+          # 7.0, not 8.x: MongoDB 8 refuses to start on Linux kernels 6.19.0–7.0.13
+          # (SERVER-121912). Standalone: replication is ours, not Mongo's (ADR 0008).
+          image: mongo:7.0
+          args: ["--wiredTigerCacheSizeGB", "0.25", "--bind_ip", "127.0.0.1"]
+          volumeMounts: [{ name: data, mountPath: /data/db }]
+          readinessProbe:
+            exec: { command: ["mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"] }
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 512Mi }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 1Gi } }
