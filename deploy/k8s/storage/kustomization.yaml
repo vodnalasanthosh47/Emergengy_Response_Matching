@@ -1,0 +1,9 @@
+# Storage tier on Kubernetes: kubectl apply -k deploy/k8s/storage
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - coordinator.yaml
+  - storage-0.yaml
+  - storage-1.yaml
+  - storage-2.yaml

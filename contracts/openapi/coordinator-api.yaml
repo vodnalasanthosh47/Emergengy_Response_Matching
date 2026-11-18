@@ -1,0 +1,392 @@
+openapi: 3.0.3
+info:
+  title: Coordinator Data API
+  version: 1.0.0
+  description: |
+    The application services' only view of storage (spec §4.2).
+
+    **This contract is frozen from CP1.** Sharding and replication are invisible here:
+    the coordinator derives each key's shard from the key itself (see the `key`
+    parameter: requests by `crc32(requestId) mod 3`, resources by
+    `crc32(geoCell) mod 3`), writes through the shard's primary, replicates to its
+    replica before answering, and reads from the replica when the primary is down.
+    Clients never learn where a record is stored (spec §4).
+
+    A write is acknowledged (2xx) only once it is on the shard's current primary and
+    every live replica. If the primary is replaced while a write is in flight, the
+    answer is `503` (outcome unknown): re-read and retry.
+
+    `/internal/nodes/*` and `/internal/topology` are for storage nodes and operators,
+    not for application services.
+
+    The full data format (keys, required indexes, request and resource documents,
+    worked examples) is in `docs/data-format.md`.
+
+    Storage is a versioned key/value store with a few exact-match "index attributes":
+
+    * `value` is the full domain document. Storage never parses it.
+    * `indexes` are flat string attributes the *writing service* copies out of `value`
+      so records can be found by `/v1/query`. Services must keep them in sync with `value`.
+    * `version` starts at 1 and increments on every successful write.
+      Writes may pass `expectedVersion` for optimistic concurrency (compare-and-set).
+      **All claims MUST use `expectedVersion`.**
+servers:
+  - url: http://coordinator:8080
+    description: Inside the Compose / Kubernetes network
+
+paths:
+  /v1/data/{key}:
+    parameters:
+      - $ref: '#/components/parameters/Key'
+    get:
+      summary: Read one record
+      operationId: getRecord
+      responses:
+        '200':
+          description: The record
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Record' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    put:
+      summary: Create or replace a record, optionally conditionally
+      operationId: putRecord
+      description: |
+        `expectedVersion` semantics:
+
+        | expectedVersion | key missing        | key exists, version == n | key exists, version != n |
+        |-----------------|--------------------|--------------------------|--------------------------|
+        | omitted         | create → 201       | replace → 200            | replace → 200            |
+        | 0               | create → 201       | 409                      | 409                      |
+        | n ≥ 1           | 412                | replace → 200            | 409                      |
+
+        On `409` the caller should re-read the record and retry its decision.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PutRequest' }
+      responses:
+        '200':
+          description: Existing record replaced
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Record' }
+        '201':
+          description: Record created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Record' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/VersionConflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    delete:
+      summary: Delete a record, optionally conditionally
+      operationId: deleteRecord
+      parameters:
+        - name: expectedVersion
+          in: query
+          required: false
+          description: |
+            If given, delete only when the current version equals this value
+            (passed as a query parameter because DELETE request bodies are poorly
+            supported by HTTP clients and proxies).
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        '204': { description: Deleted }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/VersionConflict' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /v1/query:
+    post:
+      summary: Find records by index attributes and geo cells
+      operationId: queryRecords
+      description: |
+        Returns records whose `indexes` match **all** given conditions, sorted by key.
+        Omitting `geoCells` (or sending an empty list) means "any cell"; this is how
+        `GET /resources` and `GET /requests` listings are served.
+
+        A `resource` query limited to cells (`geoCells`, or `match.geoCell`) is sent
+        only to the shards that own those cells, so it keeps working while an
+        unrelated shard is down. Every other query is sent to all shards and fails
+        with `503` if any shard has no live node (never a silently partial answer).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/QueryRequest' }
+      responses:
+        '200':
+          description: Matching records (possibly empty)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QueryResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /internal/nodes/register:
+    post:
+      summary: A storage node announces itself (on startup, or after a 404 heartbeat)
+      operationId: registerNode
+      description: |
+        The node joins its shard as a replica: SYNCING (copies what it missed from the
+        shard's primary, then ACTIVE) if the shard has a primary, otherwise ELECTING
+        (the shard elects the registered node with the newest data after a short window).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NodeInfo' }
+      responses:
+        '200':
+          description: Registered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RoleResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /internal/nodes/heartbeat:
+    post:
+      summary: A storage node reports it is alive (every 5 s)
+      operationId: nodeHeartbeat
+      description: A node silent for HEARTBEAT_TIMEOUT (15 s) is marked DOWN.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NodeInfo' }
+      responses:
+        '200':
+          description: Heartbeat accepted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RoleResponse' }
+        '404': { description: 'Unknown or DOWN node: it must register again' }
+
+  /internal/topology:
+    get:
+      summary: Shards, their nodes (role, state, last heartbeat) and record counts
+      operationId: getTopology
+      responses:
+        '200':
+          description: Cluster view
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  shards:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        shard: { type: integer }
+                        primary: { type: string, description: 'Absent: the shard has no primary (503s)' }
+                        nodes:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              nodeId: { type: string }
+                              shardId: { type: integer }
+                              url: { type: string }
+                              role: { type: string, enum: [PRIMARY, REPLICA] }
+                              state: { type: string, enum: [ELECTING, SYNCING, ACTIVE, DOWN] }
+                              lastSeen: { type: string, format: date-time }
+                              maxUpdatedAt: { type: string, format: date-time }
+                              records: { type: integer, format: int64 }
+                              tombstones: { type: integer, format: int64 }
+                              error: { type: string }
+
+  /healthz:
+    get:
+      summary: Liveness — the process is up
+      responses:
+        '200': { description: OK }
+  /readyz:
+    get:
+      summary: Readiness — every shard has a primary
+      responses:
+        '200': { description: Ready }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      responses:
+        '200':
+          description: Prometheus text exposition format
+          content:
+            text/plain: {}
+
+components:
+  parameters:
+    Key:
+      name: key
+      in: path
+      required: true
+      description: |
+        Storage key. Allowed characters: letters, digits, `:`, `_`, `-`; 1–256
+        characters. The shard is derived from the key alone, so request and resource
+        keys must have their collection's shape (otherwise `400`):
+
+        | Collection | Key | Shard |
+        |---|---|---|
+        | request | `request:{requestId}` | `crc32(requestId) mod 3` |
+        | resource | `resource:{geoCell}:{uuid}` | `crc32(geoCell) mod 3` |
+        | anything else | any valid key | `crc32(key) mod 3` |
+
+        `geoCell` is the lower-case geohash (1–12 characters of
+        `0-9b-hjkmnp-z`) of the resource's location, at the precision the Resource
+        Service uses (`GEOHASH_PRECISION`, default 6). It is part of the key, so it
+        never changes: moving a resource means re-keying it (delete + create).
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9:_-]{1,256}$'
+      examples:
+        request: { value: 'request:f3b1c2e4-0d1e-4a5b-9c8d-7e6f5a4b3c2d' }
+        resource: { value: 'resource:tdr1yz:8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77' }
+
+  schemas:
+    NodeInfo:
+      type: object
+      required: [nodeId, shardId, url]
+      properties:
+        nodeId: { type: string, example: storage-1-0 }
+        shardId: { type: integer, minimum: 0, example: 1 }
+        url: { type: string, example: 'http://storage-1-0.storage-1.emergency.svc.cluster.local:8080' }
+        maxUpdatedAt:
+          type: string
+          format: date-time
+          description: Newest updatedAt on the node; used to elect the most up-to-date node and as the start of a resync.
+
+    RoleResponse:
+      type: object
+      properties:
+        role: { type: string, enum: [PRIMARY, REPLICA] }
+
+    Record:
+      type: object
+      required: [key, value, indexes, version, updatedAt]
+      properties:
+        key: { type: string, example: 'resource:tdr1yz:8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77' }
+        value:
+          type: object
+          additionalProperties: true
+          description: The full domain document, returned exactly as written.
+        indexes: { $ref: '#/components/schemas/Indexes' }
+        version: { type: integer, format: int64, minimum: 1, example: 7 }
+        updatedAt: { type: string, format: date-time, description: 'Set by storage (UTC, millisecond precision)' }
+
+    Indexes:
+      type: object
+      description: |
+        Flat, exact-match string attributes used by `/v1/query`.
+        `collection` is required. Attribute names: letters, digits, `_` only.
+
+        Must agree with the key (otherwise `400`): a `request:` key needs
+        `collection: request`; a `resource:{geoCell}:{uuid}` key needs
+        `collection: resource` and `geoCell` equal to the key's cell (geo queries are
+        routed by cell, so a resource indexed under another cell would be missed).
+      required: [collection]
+      additionalProperties: { type: string }
+      properties:
+        collection: { type: string, example: resource }
+      example: { collection: resource, type: WATER, status: AVAILABLE, geoCell: tdr1yz }
+
+    PutRequest:
+      type: object
+      required: [value, indexes]
+      properties:
+        value:
+          type: object
+          additionalProperties: true
+          description: Full domain document (must be a JSON object). Opaque to storage.
+        indexes: { $ref: '#/components/schemas/Indexes' }
+        expectedVersion:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 'Omit = unconditional write; 0 = "must not exist"; n = "current version must be n".'
+      example:
+        value: { resourceId: res_tdr1yz_8a7c, type: WATER, capacity: { total: 500, remaining: 480, unit: L } }
+        indexes: { collection: resource, type: WATER, status: AVAILABLE, geoCell: tdr1yz }
+        expectedVersion: 6
+
+    QueryRequest:
+      type: object
+      required: [collection]
+      properties:
+        collection: { type: string, example: resource }
+        geoCells:
+          type: array
+          items: { type: string }
+          maxItems: 100
+          description: Match records whose `indexes.geoCell` is any of these. Omit or empty = any cell.
+          example: [tdr1yz, tdr1yy, tdr1zn]
+        match:
+          type: object
+          additionalProperties: { type: string }
+          description: Exact match on index attributes (all must match).
+          example: { type: WATER, status: AVAILABLE }
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          default: 50
+
+    QueryResponse:
+      type: object
+      required: [records]
+      properties:
+        records:
+          type: array
+          items: { $ref: '#/components/schemas/Record' }
+
+    Error:
+      type: object
+      required: [error, message, timestamp]
+      properties:
+        error:
+          type: string
+          enum: [INVALID_REQUEST, NOT_FOUND, VERSION_CONFLICT, PRECONDITION_FAILED, STORAGE_UNAVAILABLE, INTERNAL_ERROR]
+        message: { type: string }
+        timestamp: { type: string, format: date-time }
+      example:
+        error: VERSION_CONFLICT
+        message: 'version of resource:tdr1yz:8a7c is not 6'
+        timestamp: '2026-11-14T06:53:00Z'
+
+  responses:
+    BadRequest:
+      description: Malformed body, invalid key or key shape, indexes that contradict the key, or invalid field (`INVALID_REQUEST`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: No record with this key (`NOT_FOUND`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    VersionConflict:
+      description: '`expectedVersion` does not match the current state (`VERSION_CONFLICT`). Re-read and retry.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    PreconditionFailed:
+      description: '`expectedVersion` ≥ 1 was given but the key does not exist (`PRECONDITION_FAILED`)'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unavailable:
+      description: |
+        The storage tier could not be reached or failed, or the shard's primary was
+        replaced while the write was in flight (`STORAGE_UNAVAILABLE`). For a write the
+        outcome is unknown: re-read the record and retry.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }

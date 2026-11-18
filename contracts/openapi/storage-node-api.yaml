@@ -1,0 +1,280 @@
+openapi: 3.0.3
+info:
+  title: Storage Node Internal API
+  version: 1.0.0
+  description: |
+    Internal storage-tier API (spec §6). **Only the coordinator calls these endpoints**;
+    application services never talk to storage nodes. Each node holds one copy of one
+    shard; the coordinator decides which node is the shard's primary.
+
+    The data endpoints mirror the coordinator data API (`coordinator-api.yaml`) exactly:
+    same `Record`, same `expectedVersion` rules, same status codes. Schemas are referenced
+    from that file so the two can never drift apart.
+
+    The atomic check-and-set for `expectedVersion` happens **here**, at the node that owns
+    the key — the coordinator only passes it through.
+
+    Deletes are stored as **tombstones** so they replicate like writes. Tombstones never
+    appear on `/internal/data` or `/internal/query`; they do on the replica and sync APIs.
+
+    Registration and heartbeats go the other way (node → coordinator): see
+    `/internal/nodes/*` in `coordinator-api.yaml`.
+servers:
+  - url: http://storage-node:8080
+    description: Inside the Compose / Kubernetes network (not reachable from outside)
+
+paths:
+  /internal/data/{key}:
+    parameters:
+      - $ref: './coordinator-api.yaml#/components/parameters/Key'
+    get:
+      summary: Read one record
+      operationId: getRecord
+      responses:
+        '200':
+          description: The record
+          content:
+            application/json:
+              schema: { $ref: './coordinator-api.yaml#/components/schemas/Record' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    put:
+      summary: Create or replace a record, optionally conditionally (atomic per document)
+      operationId: putRecord
+      description: Same `expectedVersion` table as `PUT /v1/data/{key}` in `coordinator-api.yaml`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: './coordinator-api.yaml#/components/schemas/PutRequest' }
+      responses:
+        '200':
+          description: Existing record replaced
+          content:
+            application/json:
+              schema: { $ref: './coordinator-api.yaml#/components/schemas/Record' }
+        '201':
+          description: Record created
+          content:
+            application/json:
+              schema: { $ref: './coordinator-api.yaml#/components/schemas/Record' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/VersionConflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    delete:
+      summary: Delete a record, optionally conditionally
+      operationId: deleteRecord
+      parameters:
+        - name: expectedVersion
+          in: query
+          required: false
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        '200':
+          description: Deleted. Returns the tombstone (deleted=true), which the coordinator replicates.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReplicaRecord' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/VersionConflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /internal/replica/{key}:
+    parameters:
+      - $ref: './coordinator-api.yaml#/components/parameters/Key'
+    put:
+      summary: Apply a copy of the primary's write (replication and recovery)
+      operationId: applyReplica
+      description: |
+        Stores the record exactly as given (version and updatedAt included) if its
+        version is >= the stored one; otherwise ignores it (`applied: false`). Replays
+        and out-of-order deliveries are therefore harmless, and on equal versions the
+        primary's copy wins.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReplicaRecord' }
+      responses:
+        '200': { $ref: '#/components/responses/Applied' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    get:
+      summary: Read a record including tombstones (recovery)
+      operationId: getAnyRecord
+      responses:
+        '200':
+          description: The record or tombstone
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReplicaRecord' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /internal/repair/{key}:
+    parameters:
+      - $ref: './coordinator-api.yaml#/components/parameters/Key'
+      - name: expectedLocalVersion
+        in: query
+        required: true
+        description: Applied only if this node still holds this version of the key.
+        schema: { type: integer, format: int64, minimum: 1 }
+    put:
+      summary: Overwrite a write the primary never acknowledged (recovery)
+      operationId: repairRecord
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReplicaRecord' }
+      responses:
+        '200': { $ref: '#/components/responses/Applied' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    delete:
+      summary: Remove a key the primary does not have (recovery)
+      operationId: purgeRecord
+      responses:
+        '200': { $ref: '#/components/responses/Applied' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /internal/sync:
+    get:
+      summary: Records (tombstones included) changed after a cursor, oldest first
+      operationId: syncRecords
+      description: |
+        Ordered by (updatedAt, key). Pass `nextSince`/`nextKey` back as `since`/`afterKey`
+        while `more` is true. Used by the coordinator to resync a recovering node.
+      parameters:
+        - { name: since, in: query, required: false, schema: { type: string, format: date-time } }
+        - { name: afterKey, in: query, required: false, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 5000, default: 500 } }
+      responses:
+        '200':
+          description: One page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  records: { type: array, items: { $ref: '#/components/schemas/ReplicaRecord' } }
+                  more: { type: boolean }
+                  nextSince: { type: string, format: date-time }
+                  nextKey: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /internal/stats:
+    get:
+      summary: Record counts on this node (data-distribution view)
+      operationId: nodeStats
+      responses:
+        '200':
+          description: Counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nodeId: { type: string }
+                  shardId: { type: integer }
+                  records: { type: integer, format: int64 }
+                  tombstones: { type: integer, format: int64 }
+                  maxUpdatedAt: { type: string, format: date-time }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /internal/query:
+    post:
+      summary: Same body as /v1/query, answered from this node's data only
+      operationId: queryRecords
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: './coordinator-api.yaml#/components/schemas/QueryRequest' }
+      responses:
+        '200':
+          description: Matching records on this node, sorted by key
+          content:
+            application/json:
+              schema: { $ref: './coordinator-api.yaml#/components/schemas/QueryResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /healthz:
+    get:
+      summary: Liveness — the process is up
+      responses:
+        '200': { description: OK }
+  /readyz:
+    get:
+      summary: Readiness — the local MongoDB answers a ping
+      responses:
+        '200': { description: Ready }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      responses:
+        '200':
+          description: Prometheus text exposition format
+          content:
+            text/plain: {}
+
+components:
+  schemas:
+    ReplicaRecord:
+      description: A Record as stored, including tombstones (deleted=true, empty value).
+      allOf:
+        - $ref: './coordinator-api.yaml#/components/schemas/Record'
+        - type: object
+          properties:
+            deleted: { type: boolean, default: false }
+
+  responses:
+    Applied:
+      description: Whether the write was applied (false = the node's copy was kept)
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              applied: { type: boolean }
+    BadRequest:
+      description: '`INVALID_REQUEST`'
+      content:
+        application/json:
+          schema: { $ref: './coordinator-api.yaml#/components/schemas/Error' }
+    NotFound:
+      description: '`NOT_FOUND`'
+      content:
+        application/json:
+          schema: { $ref: './coordinator-api.yaml#/components/schemas/Error' }
+    VersionConflict:
+      description: '`VERSION_CONFLICT`'
+      content:
+        application/json:
+          schema: { $ref: './coordinator-api.yaml#/components/schemas/Error' }
+    PreconditionFailed:
+      description: '`PRECONDITION_FAILED`'
+      content:
+        application/json:
+          schema: { $ref: './coordinator-api.yaml#/components/schemas/Error' }
+    InternalError:
+      description: '`INTERNAL_ERROR` — unexpected failure (the coordinator reports it as 503)'
+      content:
+        application/json:
+          schema: { $ref: './coordinator-api.yaml#/components/schemas/Error' }
+    Unavailable:
+      description: '`STORAGE_UNAVAILABLE` — local MongoDB unreachable or timed out'
+      content:
+        application/json:
+          schema: { $ref: './coordinator-api.yaml#/components/schemas/Error' }

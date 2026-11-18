@@ -1,0 +1,8 @@
+# Keep the build context small and avoid baking local artifacts into the image.
+bin/
+*.test
+*.out
+coverage.*
+Dockerfile
+.dockerignore
+README.md

@@ -1,0 +1,12 @@
+# Development-only override: publishes the coordinator on 127.0.0.1:9090 so you can
+# call the storage tier directly with curl or the storage smoke test.
+#
+#   make up-dev            (= docker compose -f docker-compose.yml -f docker-compose.dev.yml up)
+#
+# Not part of the CP1 runtime: there, the nginx gateway is the only published port and
+# the coordinator is reachable only from inside the Compose network. Bound to 127.0.0.1
+# so it is never exposed to other machines on your network.
+services:
+  coordinator:
+    ports:
+      - "127.0.0.1:9090:8080"
