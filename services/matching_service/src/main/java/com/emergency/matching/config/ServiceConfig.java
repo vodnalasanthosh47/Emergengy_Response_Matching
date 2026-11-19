@@ -6,6 +6,12 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import com.emergency.common.storage.StorageClient;
+import com.emergency.matching.domain.CandidateRanking;
+import com.emergency.matching.domain.MatchingService;
+import com.emergency.matching.domain.RequestStore;
+import com.emergency.matching.domain.ResourceStore;
+import com.emergency.matching.storage.StorageRequestStore;
+import com.emergency.matching.storage.StorageResourceStore;
 
 import tools.jackson.databind.json.JsonMapper;
 
@@ -25,5 +31,21 @@ public class ServiceConfig {
     @Bean
     StorageClient storageClient(MatchingServiceProperties props, JsonMapper json) {
         return new StorageClient(props.coordinatorUrl(), props.storageTimeout(), json);
+    }
+
+    @Bean
+    RequestStore requestStore(StorageClient storage) {
+        return new StorageRequestStore(storage);
+    }
+
+    @Bean
+    ResourceStore resourceStore(StorageClient storage) {
+        return new StorageResourceStore(storage);
+    }
+
+    @Bean
+    MatchingService matchingService(RequestStore requests, ResourceStore resources, Clock clock,
+            MatchingServiceProperties props) {
+        return new MatchingService(requests, resources, new CandidateRanking(), clock, props.candidateLimit());
     }
 }
