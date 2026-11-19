@@ -151,6 +151,23 @@ on `409` re-read and check again.
 
 ---
 
+## 5a. What the Matching Service provides and relies on
+
+| Interface | Details |
+|---|---|
+| Public API | `POST /match/{requestId}`: 200 assignment, 422 `NO_MATCH`, 409 not matchable, 404, 400 (contracts/openapi/matching-service-api.yaml) |
+| Consumes | `RequestCreated` v1 from queue `matching.request-created` (bound `request.created.*`); dead letters to `matching.request-created.dlq` via `emergency.dlx` (fanout). Declared by this service on startup |
+| Writes requests | only `MATCHED` (+ `assignedResourceId`) and `UNMATCHED`, with `expectedVersion`, status index in sync (`RequestDocument.matchedTo`) |
+| Writes resources | claims and releases: `capacity.remaining` and `status` (`DEPLETED` at 0, back to `AVAILABLE` on release) together, with `expectedVersion` (`ResourceDocument.withCapacity`) |
+| Relies on | the request `details` amount fields and the resource `capacity.unit` table in §3; `RequestStatus.isMatchable`; resources' `geoCell` = key cell (geo-routed search) |
+
+A new field added to a request or resource document is ignored by matching (stored
+documents are read tolerantly), but **renaming or removing** `details.quantity`,
+`details.people`, `details.name`, `capacity.*`, `status` or `location` breaks it: add a
+change-log line and tell the matching owner.
+
+---
+
 ## 6. Adding the Resource Service (checklist that branch followed)
 
 1. Branch from `main` **after** the request-service PR is merged (it brings `common`, the
@@ -183,6 +200,9 @@ Newest first. Anything that changes an interface above gets a line.
 
 | Date | Who | Change | Affects |
 |---|---|---|---|
+| 2026-11-19 | Matching branch | Matching Service added: `POST /match/{id}`, queue `matching.request-created` + DLQ, `/match` gateway route; `common`: `RequestDocument.matchedTo`, `ResourceDocument.withCapacity` | everyone |
+| 2026-11-19 | Matching branch | With matching running, new requests are matched (or UNMATCHED) within about a second: tests must not assume a request stays PENDING (`request-smoke` asks for an unmatchable amount) | everyone writing e2e tests |
+| 2026-11-19 | Matching branch | `make up` reloads the gateway's nginx config (a running gateway did not see new routes); `make smoke` runs all service smoke tests | everyone |
 | 2026-11-19 | Request branch | Numbers sent as text (`"500"`, `"12.97"`) are now 400 in every service (`common.api.JsonStrictness` + `config/JacksonConfig` in each service; a new service must add the same config) | everyone |
 | 2026-11-19 | Request branch | Resource capacity amounts: at most 1,000,000 and 3 decimal places (`1e400` was a 500); `1e3` stored as `1000` | Resource, Matching |
 | 2026-11-19 | Request branch | Storage e2e scripts now delete the raw test records they create (they used to appear in `GET /resources` and broke `resource-smoke` on a shared stack) | everyone running e2e tests |

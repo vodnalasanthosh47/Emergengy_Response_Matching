@@ -19,7 +19,8 @@ Client → Gateway → Request Service → RabbitMQ → Matching Service → Coo
 | `common` Java module (storage client, geohash, shared types), RabbitMQ, nginx gateway | done |
 | Request Service (`services/request_service`) | done |
 | Resource Service (`services/resource_service`) | done |
-| Matching Service | in progress |
+| Matching Service (`services/matching_service`) | done |
+| Kubernetes manifests for the Java services, Gateway API (CP2) | next |
 
 ### Storage tier against the problem statement
 
@@ -60,6 +61,8 @@ make up-dev            # gateway on :8080, request service, RabbitMQ (UI on 127.
                        # coordinator (127.0.0.1:9090) + 3 shards × 2 nodes
 make request-smoke     # Request Service end to end through the gateway
 make resource-smoke    # Resource Service end to end through the gateway (incl. shard placement)
+make matching-smoke    # request → RabbitMQ → matching → MATCHED; no double booking; redelivery
+make smoke             # all three service smoke tests (spec §7.1-H)
 make topology          # shards, primaries, node states, record counts
 make storage-smoke     # data API checks through the coordinator
 make storage-failover  # distribution, then stop a primary, keep working, restart it, verify sync
@@ -85,7 +88,7 @@ contracts/openapi/     language-neutral API contracts (the source of truth betwe
 storage/coordinator/   Go — the only entry point to storage: sharding, replication, failover, recovery
 storage/storage_node/  Go — one copy of one shard's records in a standalone MongoDB
 common/                Java — code the services share: storage client, geohash, shared types, events
-services/              Java / Spring Boot application services (request_service, resource_service; matching next)
+services/              Java / Spring Boot application services (request_service, resource_service, matching_service)
                        each has a README with its status and what is left
 deploy/compose/        Docker Compose runtime and the nginx gateway
 deploy/k8s/storage/    Kubernetes manifests for the storage tier
