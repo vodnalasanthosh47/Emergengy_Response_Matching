@@ -1,0 +1,70 @@
+# RabbitMQ: one broker (spec §2: "1 RabbitMQ instance"). A StatefulSet, not a
+# Deployment, so the pod keeps its name (rabbitmq-0) and its volume: RabbitMQ names its
+# data directory after the host name, and durable queues and persistent messages live
+# there. If the pod dies, Kubernetes recreates it with the same name and volume.
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: emergency
+  labels: { app.kubernetes.io/name: rabbitmq }
+spec:
+  selector: { app.kubernetes.io/name: rabbitmq }
+  ports:
+    - { name: amqp, port: 5672, targetPort: amqp }
+    - { name: management, port: 15672, targetPort: management } # UI + HTTP API (port-forward only)
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+  namespace: emergency
+  labels: { app.kubernetes.io/name: rabbitmq, app.kubernetes.io/part-of: emergency }
+spec:
+  serviceName: rabbitmq
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: rabbitmq }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: rabbitmq, app.kubernetes.io/part-of: emergency }
+    spec:
+      # Without this Kubernetes would inject RABBITMQ_PORT=tcp://... (a "service link"
+      # for the Service named rabbitmq), which RabbitMQ's startup scripts misread.
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:4.1-management
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: amqp, containerPort: 5672 }
+            - { name: management, containerPort: 15672 }
+          env:
+            - name: RABBITMQ_DEFAULT_USER
+              valueFrom: { secretKeyRef: { name: rabbitmq-credentials, key: username } }
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom: { secretKeyRef: { name: rabbitmq-credentials, key: password } }
+          volumeMounts: [{ name: data, mountPath: /var/lib/rabbitmq }]
+          startupProbe: # the first boot takes ~20 s
+            exec: { command: ["rabbitmq-diagnostics", "-q", "ping"] }
+            periodSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            exec: { command: ["rabbitmq-diagnostics", "-q", "ping"] }
+            periodSeconds: 10
+            timeoutSeconds: 10
+          livenessProbe:
+            exec: { command: ["rabbitmq-diagnostics", "-q", "ping"] }
+            periodSeconds: 30
+            timeoutSeconds: 15
+            failureThreshold: 4
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 512Mi }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 1Gi } }
