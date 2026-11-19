@@ -9,6 +9,10 @@
 #   4. Read back; status changes: legal, idempotent, reserved (MATCHED), illegal (409).
 #   5. Invalid input is 400, unknown IDs 404, all with the standard error JSON.
 #
+# The Matching Service (if running) also consumes the event. The main request asks for
+# 999,999 L, which no resource can supply, so matching always leaves it UNMATCHED and the
+# status checks below are deterministic either way.
+#
 # Usage:  BASE_URL=http://localhost:8080 tests/e2e/request-smoke.sh
 # Needs:  bash 4+, curl, jq, and the stack started with `make up-dev` (which publishes
 #         the coordinator on :9090 and the RabbitMQ management API on :15672).
@@ -57,7 +61,7 @@ curl -sf -u "$RABBIT_AUTH" -X POST "$RABBIT_API/bindings/%2F/e/emergency.events/
 ok "queue $QUEUE bound to emergency.events with request.created.*"
 
 echo "== 1. Create"
-call POST "$BASE_URL/requests" '{"type":"WATER","location":{"lat":12.9716,"lng":77.5946},"details":{"quantity":20},"requester":{"name":"Ravi Kumar","contact":"+91-90000-00000"}}'
+call POST "$BASE_URL/requests" '{"type":"WATER","location":{"lat":12.9716,"lng":77.5946},"details":{"quantity":999999},"requester":{"name":"Ravi Kumar","contact":"+91-90000-00000"}}'
 expect 201 "create a WATER request"
 ID="$(field .requestId)"
 [[ "$ID" =~ ^[0-9a-f-]{36}$ ]] || fail "requestId $ID is not a UUID"
@@ -78,11 +82,21 @@ for doc in \
   expect 201 "create a $(jq -r .type <<<"$doc") request"
 done
 
+# Let the Matching Service (if it runs) handle the event: it marks the request UNMATCHED.
+# Without a Matching Service the request simply stays PENDING.
+SETTLED=PENDING
+for _ in $(seq 1 30); do
+  SETTLED="$(curl -s "$BASE_URL/requests/$ID" | jq -r .status)"
+  [[ "$SETTLED" == UNMATCHED ]] && break
+  sleep 0.5
+done
+[[ "$SETTLED" == UNMATCHED || "$SETTLED" == PENDING ]] || fail "request ended $SETTLED; nothing can supply 999,999 L"
+ok "after matching the request is $SETTLED (nothing can supply 999,999 L)"
 echo "== 2. Stored in the documented format (read from the coordinator)"
 call GET "$COORDINATOR_URL/v1/data/request:$ID"
 expect 200 "record exists under request:{requestId}"
 expect_field '.indexes | to_entries | map("\(.key)=\(.value)") | sort | join(",")' \
-  "collection=request,geoCell=tdr1v9,status=PENDING,type=WATER" "indexes: collection, type, status, geoCell"
+  "collection=request,geoCell=tdr1v9,status=$SETTLED,type=WATER" "indexes: collection, type, status, geoCell"
 expect_field '.value | has("version")' false "version is not stored inside the value"
 expect_field '.value.location | keys | join(",")' "lat,lng" "location is exactly {lat, lng}"
 expect_field '.value.requestId' "$ID" "value.requestId matches the key"
@@ -110,21 +124,24 @@ ok "event types: $(jq -r '[.[].routing_key] | sort | join(" ")' <<<"$got")"
 echo "== 4. Read and change status"
 call GET "$BASE_URL/requests/$ID"
 expect 200 "read it back"
-[[ "$(jq -S . "$BODY")" == "$(jq -S . <<<"$CREATED")" ]] || fail "GET differs from the POST response"
-ok "GET returns exactly what POST returned"
+keep='del(.status, .version, .updatedAt)'
+[[ "$(jq -S "$keep" "$BODY")" == "$(jq -S "$keep" <<<"$CREATED")" ]] || fail "GET differs from the POST response"
+expect_field .status "$SETTLED" "status is $SETTLED"
+ok "GET returns what POST returned (apart from the status matching set)"
+V="$(field .version)"
 call GET "$BASE_URL/requests/${ID^^}"
 expect 200 "IDs are case-insensitive"
 
 call PUT "$BASE_URL/requests/$ID/status" '{"status":"MATCHED"}'
 expect_error 400 INVALID_REQUEST "MATCHED is reserved for the Matching Service"
 call PUT "$BASE_URL/requests/$ID/status" '{"status":"FULFILLED"}'
-expect_error 409 CONFLICT "PENDING -> FULFILLED is illegal"
+expect_error 409 CONFLICT "$SETTLED -> FULFILLED is illegal"
 call PUT "$BASE_URL/requests/$ID/status" '{"status":"CANCELLED"}'
-expect 200 "PENDING -> CANCELLED"
-expect_field .version 2 "version incremented"
+expect 200 "$SETTLED -> CANCELLED"
+expect_field .version "$(( V + 1 ))" "version incremented"
 call PUT "$BASE_URL/requests/$ID/status" '{"status":"CANCELLED"}'
 expect 200 "setting CANCELLED again is a no-op (safe retry)"
-expect_field .version 2 "no-op wrote nothing"
+expect_field .version "$(( V + 1 ))" "no-op wrote nothing"
 call PUT "$BASE_URL/requests/$ID/status" '{"status":"PENDING"}'
 expect_error 409 CONFLICT "CANCELLED is final"
 call GET "$COORDINATOR_URL/v1/data/request:$ID"
