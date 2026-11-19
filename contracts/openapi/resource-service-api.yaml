@@ -1,0 +1,238 @@
+openapi: 3.0.3
+info:
+  title: Resource Service API
+  version: 1.0.0
+  description: |
+    Public API for resources (PROJECT_SPEC §4.1, PDF §5). Reached through the gateway at
+    `/resources`.
+
+    A resource is stored under `resource:{geoCell}:{uuid}` (docs/data-format.md §6), so
+    every resource of a geohash cell lives on one shard and the Matching Service's
+    nearby search only asks the shards that own the searched cells.
+servers:
+  - url: http://localhost:8080
+    description: Through the local gateway
+
+paths:
+  /resources:
+    post:
+      summary: Register a resource
+      operationId: registerResource
+      description: |
+        The server assigns `resourceId` (`res_{geoCell}_{uuid}`), computes `geoCell`
+        from `location`, sets `status: AVAILABLE` and stores the resource.
+        `capacity.remaining` defaults to `capacity.total`. Omitted units are filled in.
+
+        Unknown fields (including `resourceId`, `geoCell`, `status`) are rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterResource' }
+            examples:
+              water:
+                value:
+                  type: WATER
+                  location: { lat: 12.97, lng: 77.59 }
+                  provider: { name: Akshaya NGO, kind: NGO, contact: '+91-80000-00000' }
+                  capacity: { total: 500, unit: L }
+              medicine:
+                value:
+                  type: MEDICINE
+                  location: { lat: 12.97, lng: 77.59 }
+                  provider: { name: City Depot, kind: GOVT }
+                  capacity: { total: 100, remaining: 60 }
+                  details: { name: Paracetamol }
+      responses:
+        '201':
+          description: Registered. `Location` header is `/resources/{resourceId}`.
+          headers:
+            Location: { schema: { type: string }, description: URL of the new resource }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Resource' }
+        '400': { $ref: './common.yaml#/components/responses/BadRequest' }
+        '503': { $ref: './common.yaml#/components/responses/Unavailable' }
+    get:
+      summary: List resources
+      operationId: listResources
+      description: Sorted by storage key. Without filters every shard is asked.
+      parameters:
+        - { name: type, in: query, schema: { $ref: './common.yaml#/components/schemas/Category' } }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/ResourceStatus' } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 50 } }
+      responses:
+        '200':
+          description: The matching resources
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [resources]
+                properties:
+                  resources:
+                    type: array
+                    items: { $ref: '#/components/schemas/Resource' }
+        '400': { $ref: './common.yaml#/components/responses/BadRequest' }
+        '503': { $ref: './common.yaml#/components/responses/Unavailable' }
+
+  /resources/{resourceId}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      summary: Retrieve a resource
+      operationId: getResource
+      responses:
+        '200':
+          description: The resource
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Resource' }
+        '400': { $ref: './common.yaml#/components/responses/BadRequest' }
+        '404': { $ref: './common.yaml#/components/responses/NotFound' }
+        '503': { $ref: './common.yaml#/components/responses/Unavailable' }
+
+  /resources/{resourceId}/status:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    put:
+      summary: Change a resource's status
+      operationId: updateResourceStatus
+      description: |
+        Allowed transitions (anything else is `409`):
+
+        | from | to |
+        |---|---|
+        | AVAILABLE | DEPLETED*, OFFLINE |
+        | DEPLETED | AVAILABLE*, OFFLINE |
+        | OFFLINE | AVAILABLE |
+
+        \* moves made only by the Matching Service when a claim empties the capacity
+        or releases it. Requesting `DEPLETED` here is `400`; `AVAILABLE` with no
+        remaining capacity is `409`. Setting the status the resource already has is a
+        no-op `200`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StatusUpdate' }
+            example: { status: OFFLINE }
+      responses:
+        '200':
+          description: The updated resource
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Resource' }
+        '400': { $ref: './common.yaml#/components/responses/BadRequest' }
+        '404': { $ref: './common.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common.yaml#/components/responses/Conflict' }
+        '503': { $ref: './common.yaml#/components/responses/Unavailable' }
+
+components:
+  parameters:
+    ResourceId:
+      name: resourceId
+      in: path
+      required: true
+      description: '`res_{geoCell}_{uuid}` (anything else is `400`).'
+      schema: { type: string, example: res_tdr1v9_8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77 }
+
+  schemas:
+    ResourceStatus:
+      type: string
+      enum: [AVAILABLE, DEPLETED, OFFLINE]
+
+    ProviderKind:
+      type: string
+      enum: [VOLUNTEER, NGO, GOVT, INDIVIDUAL, OTHER]
+
+    Provider:
+      type: object
+      required: [name, kind]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        kind: { $ref: '#/components/schemas/ProviderKind' }
+        contact: { type: string, maxLength: 200 }
+
+    CapacityInput:
+      type: object
+      required: [total]
+      additionalProperties: false
+      description: |
+        Units are fixed per type: WATER `L` (decimals allowed), FOOD `MEALS`,
+        MEDICINE `UNITS`, TRANSPORT and SHELTER `PEOPLE` (whole numbers).
+      properties:
+        total: { type: number, exclusiveMinimum: true, minimum: 0 }
+        remaining:
+          type: number
+          exclusiveMinimum: true
+          minimum: 0
+          description: Defaults to `total`; must not exceed it.
+        unit: { type: string, enum: [L, MEALS, UNITS, PEOPLE] }
+
+    Capacity:
+      type: object
+      required: [total, remaining, unit]
+      properties:
+        total: { type: number }
+        remaining: { type: number }
+        unit: { type: string, enum: [L, MEALS, UNITS, PEOPLE] }
+
+    ResourceDetails:
+      type: object
+      additionalProperties: false
+      description: |
+        MEDICINE: `{ "name": string }` (required; must equal the request's medicine
+        name to match). Every other type: `{}` (may be omitted).
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+
+    RegisterResource:
+      type: object
+      required: [type, location, provider, capacity]
+      additionalProperties: false
+      properties:
+        type: { $ref: './common.yaml#/components/schemas/Category' }
+        location: { $ref: './common.yaml#/components/schemas/Location' }
+        provider: { $ref: '#/components/schemas/Provider' }
+        capacity: { $ref: '#/components/schemas/CapacityInput' }
+        details: { $ref: '#/components/schemas/ResourceDetails' }
+
+    StatusUpdate:
+      type: object
+      required: [status]
+      additionalProperties: false
+      properties:
+        status: { $ref: '#/components/schemas/ResourceStatus' }
+
+    Resource:
+      type: object
+      required: [resourceId, type, provider, location, geoCell, capacity, details, status, createdAt, updatedAt, version]
+      properties:
+        resourceId: { type: string, example: res_tdr1v9_8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77 }
+        type: { $ref: './common.yaml#/components/schemas/Category' }
+        provider: { $ref: '#/components/schemas/Provider' }
+        location: { $ref: './common.yaml#/components/schemas/Location' }
+        geoCell: { $ref: './common.yaml#/components/schemas/GeoCell' }
+        capacity: { $ref: '#/components/schemas/Capacity' }
+        details: { $ref: '#/components/schemas/ResourceDetails' }
+        status: { $ref: '#/components/schemas/ResourceStatus' }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        version:
+          type: integer
+          format: int64
+          description: Storage version; increases on every change.
+      example:
+        resourceId: res_tdr1v9_8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77
+        type: WATER
+        provider: { name: Akshaya NGO, kind: NGO, contact: '+91-80000-00000' }
+        location: { lat: 12.97, lng: 77.59 }
+        geoCell: tdr1v9
+        capacity: { total: 500, remaining: 500, unit: L }
+        details: {}
+        status: AVAILABLE
+        createdAt: '2026-11-19T10:00:00Z'
+        updatedAt: '2026-11-19T10:00:00Z'
+        version: 1
