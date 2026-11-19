@@ -26,7 +26,7 @@ ENVOY_GATEWAY_VERSION ?= v1.9.3
 	storage-failover storage-resilience storage-e2e request-smoke resource-smoke matching-smoke smoke \
 	k8s-start k8s-gateway-install k8s-images k8s-secrets k8s-up k8s-forward k8s-status k8s-recovery \
 	k8s-scaling k8s-storage-failover k8s-e2e k8s-down \
-	k8s-clean clean
+	k8s-clean demo clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-17s\033[0m %s\n", $$1, $$2}'
@@ -153,6 +153,9 @@ k8s-storage-failover: ## Delete a storage primary pod: replica takes over, recre
 	MODE=k8s tests/e2e/storage-failover.sh
 
 k8s-e2e: smoke k8s-storage-failover k8s-recovery k8s-scaling ## Every Kubernetes check: smoke, storage failover, recovery, scaling
+
+demo: ## The final demonstration (PDF §10), step by step with pauses (needs k8s-forward; DEMO_PAUSE=0, DEMO_FROM=N)
+	scripts/demo.sh
 
 k8s-down: ## Remove the deployment but keep the namespace and its volumes (the data)
 	kubectl delete -k $(K8S_DIR)/gateway --ignore-not-found
