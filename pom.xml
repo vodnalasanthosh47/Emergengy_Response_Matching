@@ -29,6 +29,7 @@
 
   <modules>
     <module>common</module>
+    <module>services/request_service</module>
     <!-- services/resource_service and services/matching_service are added by their own branches -->
   </modules>
 
