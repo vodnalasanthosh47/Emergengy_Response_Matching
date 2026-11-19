@@ -50,7 +50,7 @@ import tools.jackson.databind.json.JsonMapper;
 
 /** The HTTP layer with the real Jackson and validation settings, and the service mocked. */
 @WebMvcTest(ResourceController.class)
-@Import(ResourceControllerTest.FixedClock.class)
+@Import({ResourceControllerTest.FixedClock.class, com.emergency.resource.config.JacksonConfig.class})
 class ResourceControllerTest {
 
     static final String ID = "res_tdr1v9_8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77";
@@ -111,6 +111,9 @@ class ResourceControllerTest {
             "{\"type\":\"water\",\"location\":{\"lat\":12.97,\"lng\":77.59},\"provider\":{\"name\":\"a\",\"kind\":\"NGO\"},\"capacity\":{\"total\":5}} | invalid value for 'type'",
             "{\"type\":\"WATER\",\"location\":{\"lat\":12.97,\"lng\":77.59},\"provider\":{\"name\":\"a\",\"kind\":\"CHARITY\"},\"capacity\":{\"total\":5}} | invalid value for 'provider.kind'",
             "{\"type\":\"WATER\",\"location\":{\"lat\":12.97,\"lng\":77.59},\"provider\":{\"name\":\"a\",\"kind\":\"NGO\"},\"capacity\":{\"total\":\"lots\"}} | invalid value for 'capacity.total'",
+            "{\"type\":\"WATER\",\"location\":{\"lat\":12.97,\"lng\":77.59},\"provider\":{\"name\":\"a\",\"kind\":\"NGO\"},\"capacity\":{\"total\":\"500\"}} | invalid value for 'capacity.total'",
+            "{\"type\":\"WATER\",\"location\":{\"lat\":12.97,\"lng\":77.59},\"provider\":{\"name\":\"a\",\"kind\":\"NGO\"},\"capacity\":{\"total\":5,\"remaining\":\"3\"}} | invalid value for 'capacity.remaining'",
+            "{\"type\":\"WATER\",\"location\":{\"lat\":\"12.97\",\"lng\":77.59},\"provider\":{\"name\":\"a\",\"kind\":\"NGO\"},\"capacity\":{\"total\":5}} | invalid value for 'location.lat'",
             "{\"type\":\"WATER\",\"location\":{\"lat\":95,\"lng\":77.59},\"provider\":{\"name\":\"a\",\"kind\":\"NGO\"},\"capacity\":{\"total\":5}} | location.lat must be less than or equal to 90",
             "{\"type\":\"WATER\",\"location\":{\"lat\":12.97,\"lng\":77.59},\"provider\":{\"name\":\" \",\"kind\":\"NGO\"},\"capacity\":{\"total\":5}} | provider.name must not be blank",
             "{\"type\":\"WATER\",\"location\":{\"lat\":12.97,\"lng\":77.59},\"provider\":{\"name\":\"a\",\"kind\":\"NGO\"},\"capacity\":{}} | capacity.total must not be null",

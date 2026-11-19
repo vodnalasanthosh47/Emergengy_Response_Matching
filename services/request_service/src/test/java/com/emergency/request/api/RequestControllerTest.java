@@ -47,7 +47,7 @@ import tools.jackson.databind.json.JsonMapper;
  * domain mocked: status codes, the error JSON, and that bad input never reaches the domain.
  */
 @WebMvcTest(RequestController.class)
-@Import(RequestControllerTest.FixedClock.class)
+@Import({RequestControllerTest.FixedClock.class, com.emergency.request.config.JacksonConfig.class})
 class RequestControllerTest {
 
     static final String ID = "f3b1c2e4-0d1e-4a5b-9c8d-7e6f5a4b3c2d";
@@ -103,6 +103,8 @@ class RequestControllerTest {
             "lng out of range    | {\"type\":\"WATER\",\"location\":{\"lat\":1,\"lng\":-181},\"details\":{}}   | location.lng",
             "missing lat         | {\"type\":\"WATER\",\"location\":{\"lng\":2},\"details\":{}}                | location.lat",
             "lat not a number    | {\"type\":\"WATER\",\"location\":{\"lat\":\"x\",\"lng\":2},\"details\":{}}  | invalid value for 'location.lat'",
+            "lat number as text  | {\"type\":\"WATER\",\"location\":{\"lat\":\"12.97\",\"lng\":2},\"details\":{}} | invalid value for 'location.lat'",
+            "lng number as text  | {\"type\":\"WATER\",\"location\":{\"lat\":1,\"lng\":\"77.59\"},\"details\":{}} | invalid value for 'location.lng'",
             "missing details     | {\"type\":\"WATER\",\"location\":{\"lat\":1,\"lng\":2}}                     | details",
             "client sent geoCell | {\"type\":\"WATER\",\"location\":{\"lat\":1,\"lng\":2},\"details\":{},\"geoCell\":\"tdr1v9\"} | unknown field 'geoCell'",
             "client sent status  | {\"type\":\"WATER\",\"location\":{\"lat\":1,\"lng\":2},\"details\":{},\"status\":\"MATCHED\"} | unknown field 'status'",
