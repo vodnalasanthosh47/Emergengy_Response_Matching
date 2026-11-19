@@ -10,6 +10,7 @@ import com.emergency.matching.domain.CandidateRanking;
 import com.emergency.matching.domain.MatchingService;
 import com.emergency.matching.domain.RequestStore;
 import com.emergency.matching.domain.ResourceStore;
+import com.emergency.matching.messaging.RequestCreatedListener;
 import com.emergency.matching.storage.StorageRequestStore;
 import com.emergency.matching.storage.StorageResourceStore;
 
@@ -47,5 +48,10 @@ public class ServiceConfig {
     MatchingService matchingService(RequestStore requests, ResourceStore resources, Clock clock,
             MatchingServiceProperties props) {
         return new MatchingService(requests, resources, new CandidateRanking(), clock, props.candidateLimit());
+    }
+
+    @Bean
+    RequestCreatedListener requestCreatedListener(MatchingService matching, JsonMapper json, MatchingServiceProperties props) {
+        return new RequestCreatedListener(matching, json, props.eventAttempts(), props.eventRetryDelay());
     }
 }
