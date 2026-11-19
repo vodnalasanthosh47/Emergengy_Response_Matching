@@ -160,14 +160,16 @@ components:
       required: [total]
       additionalProperties: false
       description: |
-        Units are fixed per type: WATER `L` (decimals allowed), FOOD `MEALS`,
-        MEDICINE `UNITS`, TRANSPORT and SHELTER `PEOPLE` (whole numbers).
+        Units are fixed per type: WATER `L` (up to 3 decimal places), FOOD `MEALS`,
+        MEDICINE `UNITS`, TRANSPORT and SHELTER `PEOPLE` (whole numbers). Amounts must
+        be JSON numbers (`"500"` as text is `400`) and at most 1,000,000.
       properties:
-        total: { type: number, exclusiveMinimum: true, minimum: 0 }
+        total: { type: number, exclusiveMinimum: true, minimum: 0, maximum: 1000000 }
         remaining:
           type: number
           exclusiveMinimum: true
           minimum: 0
+          maximum: 1000000
           description: Defaults to `total`; must not exceed it.
         unit: { type: string, enum: [L, MEALS, UNITS, PEOPLE] }
 

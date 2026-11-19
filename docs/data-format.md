@@ -264,7 +264,7 @@ conditional write updating `value.status`, `value.updatedAt` **and** `indexes.st
 | `type` | enum | Same categories as requests (that is what matching joins on). |
 | `provider` | `{name, kind, contact}` | `kind`: `VOLUNTEER` \| `NGO` \| `GOVT` \| `INDIVIDUAL` \| `OTHER`. A provider is not a type. |
 | `location`, `geoCell` | as for requests | `geoCell` **must equal the key's cell and `indexes.geoCell`**. |
-| `capacity` | `{total, remaining, unit}` | Numbers (WATER may be decimal, other types whole). `unit` by type: WATER `L`, FOOD `MEALS`, MEDICINE `UNITS`, TRANSPORT/SHELTER `PEOPLE`. `remaining` starts at `total` unless given, and decreases on each claim. |
+| `capacity` | `{total, remaining, unit}` | Numbers, at most 1,000,000 (WATER may have up to 3 decimal places, other types whole). `unit` by type: WATER `L`, FOOD `MEALS`, MEDICINE `UNITS`, TRANSPORT/SHELTER `PEOPLE`. `remaining` starts at `total` unless given, and decreases on each claim. |
 | `details` | object | MEDICINE: `{ "name": string }`; others `{}`. |
 | `status` | enum | Section 6.2. |
 | `createdAt`, `updatedAt` | ISO-8601 string | Set by the service. |

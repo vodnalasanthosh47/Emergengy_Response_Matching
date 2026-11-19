@@ -73,6 +73,30 @@ class ResourceValidatorTest {
                 .hasMessage("capacity.unit must be \"L\" for WATER");
     }
 
+    /** Values storage cannot hold exactly are a 400, not a 500 from the storage write. */
+    @Test
+    void amountsMustFitStorage() {
+        assertThat(validator.capacity(Category.SHELTER, cap("1000000", null, null)).total()).isEqualByComparingTo("1000000");
+        assertThatThrownBy(() -> validator.capacity(Category.SHELTER, cap("1000001", null, null)))
+                .isInstanceOf(InvalidResourceException.class).hasMessage("capacity.total must be at most 1000000");
+        assertThatThrownBy(() -> validator.capacity(Category.WATER, cap("1e400", null, null)))
+                .isInstanceOf(InvalidResourceException.class).hasMessage("capacity.total must be at most 1000000");
+        assertThatThrownBy(() -> validator.capacity(Category.WATER, cap("10", "1e400", null)))
+                .isInstanceOf(InvalidResourceException.class).hasMessage("capacity.remaining must be at most 1000000");
+        assertThat(validator.capacity(Category.WATER, cap("0.125", null, null)).total()).isEqualByComparingTo("0.125");
+        assertThatThrownBy(() -> validator.capacity(Category.WATER, cap("0.1234", null, null)))
+                .isInstanceOf(InvalidResourceException.class).hasMessage("capacity.total must have at most 3 decimal places");
+        assertThatThrownBy(() -> validator.capacity(Category.WATER, cap("1e-400", null, null)))
+                .isInstanceOf(InvalidResourceException.class).hasMessage("capacity.total must have at most 3 decimal places");
+    }
+
+    @Test
+    void exponentNotationIsStoredAsAPlainNumber() {
+        Capacity c = validator.capacity(Category.FOOD, cap("1e3", null, null));
+        assertThat(c.total().toString()).isEqualTo("1000");
+        assertThat(c.remaining().toString()).isEqualTo("1000");
+    }
+
     @Test
     void medicineNeedsATrimmedName() {
         assertThat(validator.details(Category.MEDICINE, node("{\"name\":\"  Paracetamol \"}")))

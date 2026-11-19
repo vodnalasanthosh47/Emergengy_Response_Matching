@@ -81,6 +81,15 @@ public class ResourceValidator {
         return out;
     }
 
+    /**
+     * Upper bound for any capacity. Storage keeps numbers as 64-bit floats, so an amount
+     * such as 1e400 cannot be stored at all (it used to fail with a 500); a million litres,
+     * meals, units or people is far above any real resource.
+     */
+    static final BigDecimal MAX_AMOUNT = new BigDecimal("1000000");
+    /** WATER may be fractional, to the millilitre; more digits would not survive storage exactly. */
+    static final int MAX_DECIMALS = 3;
+
     // scale() > 0 means the client wrote a fraction (e.g. 20.5 or 20.0); the request side
     // rejects 20.0 for whole-number amounts too.
     private static BigDecimal amount(String field, BigDecimal value, boolean whole) {
@@ -90,9 +99,16 @@ public class ResourceValidator {
         if (value.signum() <= 0) {
             throw new InvalidResourceException(field + " must be > 0");
         }
+        if (value.compareTo(MAX_AMOUNT) > 0) {
+            throw new InvalidResourceException(field + " must be at most " + MAX_AMOUNT);
+        }
         if (whole && value.scale() > 0) {
             throw new InvalidResourceException(field + " must be a whole number");
         }
-        return value;
+        if (value.scale() > MAX_DECIMALS) {
+            throw new InvalidResourceException(field + " must have at most " + MAX_DECIMALS + " decimal places");
+        }
+        // 1e3 arrives as 1E+3 (negative scale); store it as plain 1000.
+        return value.scale() < 0 ? value.setScale(0) : value;
     }
 }
