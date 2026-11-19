@@ -31,4 +31,14 @@ public record ResourceDocument(
         return new ResourceDocument(resourceId, type, provider, location, geoCell, capacity, details, newStatus,
                 createdAt, now);
     }
+
+    /**
+     * A copy with new capacity and status, changed together in one write (a claim that
+     * empties the resource also makes it DEPLETED). Used by the Matching Service to claim
+     * and to give capacity back.
+     */
+    public ResourceDocument withCapacity(Capacity newCapacity, ResourceStatus newStatus, Instant now) {
+        return new ResourceDocument(resourceId, type, provider, location, geoCell, newCapacity, details, newStatus,
+                createdAt, now);
+    }
 }

@@ -61,4 +61,15 @@ class ResourceJsonTest {
         assertThat(Capacity.unitFor(Category.TRANSPORT)).isEqualTo("PEOPLE");
         assertThat(Capacity.unitFor(Category.SHELTER)).isEqualTo("PEOPLE");
     }
+
+    @Test
+    void withCapacityChangesOnlyCapacityStatusAndTime() {
+        Instant later = Instant.parse("2026-11-19T11:00:00Z");
+        Capacity empty = new Capacity(new BigDecimal("500"), BigDecimal.ZERO, "L");
+        ResourceDocument claimed = doc.withCapacity(empty, ResourceStatus.DEPLETED, later);
+        assertThat(claimed.capacity()).isEqualTo(empty);
+        assertThat(claimed.status()).isEqualTo(ResourceStatus.DEPLETED);
+        assertThat(claimed.updatedAt()).isEqualTo(later);
+        assertThat(claimed).usingRecursiveComparison().ignoringFields("capacity", "status", "updatedAt").isEqualTo(doc);
+    }
 }

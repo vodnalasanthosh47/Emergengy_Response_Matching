@@ -51,4 +51,15 @@ class RequestJsonTest {
         assertThat(EventTopology.requestCreatedRoutingKey(Category.WATER)).isEqualTo("request.created.water");
         assertThat(json.treeToValue(n, RequestCreatedEvent.class)).isEqualTo(event);
     }
+
+    @Test
+    void matchedToSetsStatusAndAssignmentTogether() {
+        Instant later = Instant.parse("2026-11-19T10:16:00Z");
+        RequestDocument matched = doc.matchedTo("res_tdr1v9_8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77", later);
+        assertThat(matched.status()).isEqualTo(RequestStatus.MATCHED);
+        assertThat(matched.assignedResourceId()).isEqualTo("res_tdr1v9_8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77");
+        assertThat(matched.updatedAt()).isEqualTo(later);
+        assertThat(matched).usingRecursiveComparison().ignoringFields("status", "assignedResourceId", "updatedAt")
+                .isEqualTo(doc);
+    }
 }
