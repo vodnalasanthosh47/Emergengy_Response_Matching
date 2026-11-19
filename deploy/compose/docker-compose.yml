@@ -2,11 +2,11 @@
 #     make images && make up
 #
 #   client ──► gateway (nginx, the only published port: 8080)
-#                 │ /requests
-#                 ▼
-#             request-service ──publish──► rabbitmq ──► (matching-service, next)
-#                 │ /v1/data
-#                 ▼
+#                 │ /requests                          │ /resources
+#                 ▼                                    ▼
+#             request-service ──publish──► rabbitmq   resource-service
+#                 │ /v1/data      (matching-service, next) │ /v1/data, /v1/query
+#                 ▼◄───────────────────────────────────────┘
 #             coordinator ◄──register/heartbeat── storage-{0,1,2}-{a,b} ──driver──► mongo-{0,1,2}-{a,b}
 #                         ──/internal/...──────►
 #
@@ -106,6 +106,7 @@ services:
     restart: unless-stopped
     depends_on:
       request-service: { condition: service_healthy }
+      resource-service: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
       interval: 10s
@@ -132,6 +133,26 @@ services:
       rabbitmq: { condition: service_healthy }
     healthcheck:
       # Readiness: RabbitMQ and the coordinator reachable (the image has curl).
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 60s
+      start_interval: 2s
+
+  resource-service:
+    image: emergency/resource-service:${IMAGE_TAG:-local}
+    environment:
+      SERVER_PORT: "8080"
+      COORDINATOR_URL: http://coordinator:8080
+      # Must equal the Request Service's, or matching compares different cells.
+      GEOHASH_PRECISION: "6"
+    networks: [services]
+    mem_limit: 512m
+    restart: unless-stopped
+    depends_on:
+      coordinator: { condition: service_healthy }
+    healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]
       interval: 10s
       timeout: 3s

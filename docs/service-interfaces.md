@@ -45,7 +45,7 @@ contracts and small utilities only, never business logic.
 | `common.api` | `ErrorResponse` (the one error JSON) and its codes | shared |
 | `common.request` | `RequestDocument`, `RequestView`, `RequestStatus` (+ transition table), `Requester` | Request Service |
 | `common.events` | `RequestCreatedEvent`, `EventTopology` (exchange, routing keys, queue names) | Request Service (publisher) + Matching (consumer) |
-| `common.resource` | *(to add)* `ResourceDocument`, `ResourceStatus`, `Capacity`, `Provider` | Resource Service |
+| `common.resource` | `ResourceDocument`, `ResourceView`, `ResourceStatus` (+ transition table), `Capacity` (+ unit per type), `Provider`, `ProviderKind` | Resource Service |
 
 Rules:
 - Add new packages for a new service's types (e.g. `common.resource`) rather than
@@ -95,14 +95,13 @@ document never breaks another service that reads it. API input stays strict.
 | Config | env vars only: `SERVER_PORT`, `COORDINATOR_URL`, `RABBITMQ_*`, `GEOHASH_PRECISION` | spec §6 |
 | Health | `/actuator/health/liveness`, `/actuator/health/readiness` (include `storage`), `/actuator/prometheus` | request service's application.yml |
 
-### Amounts and units (request `details` ↔ resource `capacity`) — to agree
+### Amounts and units (request `details` ↔ resource `capacity`) — agreed
 
 Matching compares a request's amount with a resource's `capacity.remaining`, so they
-must be in the same unit. The request side is implemented as below; **the Resource
-Service should use the same `capacity.unit` per type** (proposal, confirm before
-building):
+must be in the same unit. Both services implement this table (the resource side in
+`Capacity.unitFor` and `ResourceValidator`):
 
-| type | request amount (Request Service) | resource `capacity.unit` (proposal) | extra rule |
+| type | request amount (Request Service) | resource `capacity.unit` (Resource Service) | extra rule |
 |---|---|---|---|
 | WATER | `details.quantity` litres (decimal allowed), `unit: "L"` | `L` | |
 | FOOD | `details.quantity` meals (whole), `unit: "MEALS"` | `MEALS` | |
@@ -134,7 +133,24 @@ Known gaps (documented, not solved in CP1):
 
 ---
 
-## 5. Adding the Resource Service (checklist for that branch)
+## 5. What the Resource Service provides
+
+| Interface | Details |
+|---|---|
+| Public API | `POST /resources`, `GET /resources?type=&status=&limit=`, `GET /resources/{id}`, `PUT /resources/{id}/status` (contracts/openapi/resource-service-api.yaml) |
+| Stored resource | `resource:{geoCell}:{uuid}` → `ResourceDocument` (docs/data-format.md §6); `geoCell` from `GeoHash.encode(lat, lng, 6)`, the same as requests |
+| Capacity | `capacity.total` / `remaining` are numbers in the unit above; `remaining` starts at `total` unless the provider says otherwise |
+| Status rules | `ResourceStatus.canTransitionTo`; clients may set `AVAILABLE` and `OFFLINE`; **`DEPLETED` (and `DEPLETED → AVAILABLE`) only by the Matching Service**, in the write that changes `capacity.remaining` |
+
+What the Matching Service must do with resources (spec §5): query candidates with
+`StorageQuery("resource", GeoHash.withNeighbours(cell), {type, status: AVAILABLE}, n)`;
+claim by re-reading the resource and writing `capacity.remaining - amount` with
+`expectedVersion`; at `0` also set `status: DEPLETED` in both `value` and `indexes`;
+on `409` re-read and check again.
+
+---
+
+## 6. Adding the Resource Service (checklist that branch followed)
 
 1. Branch from `main` **after** the request-service PR is merged (it brings `common`, the
    root `pom.xml` and the Compose/gateway wiring). Until then, branch from
@@ -160,12 +176,14 @@ root `pom.xml` `<modules>`, `Makefile` `JAVA_SERVICES`, `deploy/compose/docker-c
 
 ---
 
-## 6. Change log
+## 7. Change log
 
 Newest first. Anything that changes an interface above gets a line.
 
 | Date | Who | Change | Affects |
 |---|---|---|---|
+| 2026-11-19 | Resource branch | Added `common.resource` (`ResourceDocument`, `ResourceView`, `ResourceStatus`, `Capacity`, `Provider`, `ProviderKind`), the Resource API (contracts/openapi/resource-service-api.yaml), and the `/resources` gateway route | Matching |
+| 2026-11-19 | Resource branch | Resource `capacity.unit` per type agreed (L, MEALS, UNITS, PEOPLE) and implemented | Request, Matching |
 | 2026-11-19 | Request branch | Added `common` (storage client, keys, geohash, categories, error JSON, request types, `RequestCreated`), root Maven build, RabbitMQ + gateway in Compose | everyone |
 | 2026-11-19 | Request branch | Request API, stored request format and `RequestCreated` v1 defined (contracts/) | Matching |
 | 2026-11-19 | Request branch | Proposed resource `capacity.unit` per type (§3); needs Resource Service agreement | Resource, Matching |
