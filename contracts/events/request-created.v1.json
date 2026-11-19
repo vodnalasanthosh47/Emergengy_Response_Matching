@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://emergency.local/contracts/events/request-created.v1.json",
+  "title": "RequestCreated v1",
+  "description": "Published by the Request Service after a request is stored. Exchange emergency.events (topic, durable), routing key request.created.<type in lower case>, persistent, content type application/json, AMQP message-id = eventId. Carries the full request (event-carried state transfer), but consumers must re-read the request from storage before acting: the snapshot may be stale (e.g. already cancelled). The request object has the same shape as EmergencyRequest in contracts/openapi/request-service-api.yaml.",
+  "type": "object",
+  "required": ["eventId", "eventType", "schemaVersion", "occurredAt", "request"],
+  "additionalProperties": false,
+  "properties": {
+    "eventId": { "type": "string", "format": "uuid" },
+    "eventType": { "const": "RequestCreated" },
+    "schemaVersion": { "const": 1 },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "request": {
+      "type": "object",
+      "required": ["requestId", "type", "location", "geoCell", "status", "details", "createdAt", "updatedAt", "version"],
+      "properties": {
+        "requestId": { "type": "string", "format": "uuid" },
+        "type": { "enum": ["WATER", "FOOD", "MEDICINE", "TRANSPORT", "SHELTER"] },
+        "location": {
+          "type": "object",
+          "required": ["lat", "lng"],
+          "properties": {
+            "lat": { "type": "number", "minimum": -90, "maximum": 90 },
+            "lng": { "type": "number", "minimum": -180, "maximum": 180 }
+          }
+        },
+        "geoCell": { "type": "string", "pattern": "^[0123456789bcdefghjkmnpqrstuvwxyz]{1,12}$" },
+        "status": { "const": "PENDING" },
+        "requester": { "type": ["object", "null"] },
+        "details": { "type": "object", "description": "Shape by type: see RequestDetails in request-service-api.yaml" },
+        "assignedResourceId": { "type": "null" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "version": { "type": "integer", "minimum": 1 }
+      }
+    }
+  },
+  "examples": [
+    {
+      "eventId": "0c9f8b52-6a1e-4f43-9d0b-1f2e3d4c5b6a",
+      "eventType": "RequestCreated",
+      "schemaVersion": 1,
+      "occurredAt": "2026-11-19T10:15:00.120Z",
+      "request": {
+        "requestId": "f3b1c2e4-0d1e-4a5b-9c8d-7e6f5a4b3c2d",
+        "type": "WATER",
+        "location": { "lat": 12.9716, "lng": 77.5946 },
+        "geoCell": "tdr1v9",
+        "status": "PENDING",
+        "requester": { "name": "Ravi Kumar", "contact": "+91-90000-00000" },
+        "details": { "quantity": 20, "unit": "L" },
+        "assignedResourceId": null,
+        "createdAt": "2026-11-19T10:15:00.112Z",
+        "updatedAt": "2026-11-19T10:15:00.112Z",
+        "version": 1
+      }
+    }
+  ]
+}

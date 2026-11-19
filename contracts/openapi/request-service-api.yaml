@@ -1,0 +1,230 @@
+openapi: 3.0.3
+info:
+  title: Request Service API
+  version: 1.0.0
+  description: |
+    Public API for emergency requests (PROJECT_SPEC §4.1, PDF §5). Reached through the
+    gateway at `/requests`.
+
+    Creating a request stores it (key `request:{requestId}`, see docs/data-format.md)
+    and publishes a `RequestCreated` event (contracts/events/request-created.v1.json),
+    which the Matching Service consumes.
+servers:
+  - url: http://localhost:8080
+    description: Through the local gateway
+
+paths:
+  /requests:
+    post:
+      summary: Create an emergency request
+      operationId: createRequest
+      description: |
+        The server assigns `requestId`, computes `geoCell` from `location`, sets
+        `status: PENDING`, stores the request, then publishes `RequestCreated`. If the
+        event cannot be published the stored request is removed again and the answer
+        is `503`, so a retry never leaves a request nobody will match.
+
+        Unknown fields (including `geoCell`, `status`, `requestId`) are rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateRequest' }
+            examples:
+              water:
+                value:
+                  type: WATER
+                  location: { lat: 12.9716, lng: 77.5946 }
+                  details: { quantity: 20, unit: L }
+                  requester: { name: Ravi Kumar, contact: '+91-90000-00000' }
+              transport:
+                value:
+                  type: TRANSPORT
+                  location: { lat: 12.9716, lng: 77.5946 }
+                  details: { people: 4, destination: { lat: 12.93, lng: 77.62 } }
+      responses:
+        '201':
+          description: Created. `Location` header is `/requests/{requestId}`.
+          headers:
+            Location: { schema: { type: string }, description: URL of the new request }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EmergencyRequest' }
+        '400': { $ref: './common.yaml#/components/responses/BadRequest' }
+        '503': { $ref: './common.yaml#/components/responses/Unavailable' }
+
+  /requests/{requestId}:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    get:
+      summary: Retrieve a request
+      operationId: getRequest
+      responses:
+        '200':
+          description: The request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EmergencyRequest' }
+        '400': { $ref: './common.yaml#/components/responses/BadRequest' }
+        '404': { $ref: './common.yaml#/components/responses/NotFound' }
+        '503': { $ref: './common.yaml#/components/responses/Unavailable' }
+
+  /requests/{requestId}/status:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    put:
+      summary: Change a request's status
+      operationId: updateRequestStatus
+      description: |
+        Allowed transitions (anything else is `409`):
+
+        | from | to |
+        |---|---|
+        | PENDING | UNMATCHED*, MATCHED*, CANCELLED |
+        | UNMATCHED | PENDING, MATCHED*, CANCELLED |
+        | MATCHED | IN_PROGRESS, CANCELLED |
+        | IN_PROGRESS | FULFILLED |
+        | FULFILLED, CANCELLED | (final) |
+
+        \* `MATCHED` and `UNMATCHED` are set only by the Matching Service (it records
+        the assigned resource); requesting them here is `400`. Setting the status the
+        request already has is a no-op `200`, so retrying after a `503` is safe.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StatusUpdate' }
+            example: { status: CANCELLED }
+      responses:
+        '200':
+          description: The updated request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EmergencyRequest' }
+        '400': { $ref: './common.yaml#/components/responses/BadRequest' }
+        '404': { $ref: './common.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common.yaml#/components/responses/Conflict' }
+        '503': { $ref: './common.yaml#/components/responses/Unavailable' }
+
+components:
+  parameters:
+    RequestId:
+      name: requestId
+      in: path
+      required: true
+      description: The request's UUID (anything else is `400`).
+      schema: { type: string, format: uuid, example: f3b1c2e4-0d1e-4a5b-9c8d-7e6f5a4b3c2d }
+
+  schemas:
+    RequestStatus:
+      type: string
+      enum: [PENDING, UNMATCHED, MATCHED, IN_PROGRESS, FULFILLED, CANCELLED]
+
+    Requester:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, maxLength: 200 }
+        contact: { type: string, maxLength: 200 }
+
+    CreateRequest:
+      type: object
+      required: [type, location, details]
+      additionalProperties: false
+      properties:
+        type: { $ref: './common.yaml#/components/schemas/Category' }
+        location: { $ref: './common.yaml#/components/schemas/Location' }
+        details: { $ref: '#/components/schemas/RequestDetails' }
+        requester: { $ref: '#/components/schemas/Requester' }
+
+    StatusUpdate:
+      type: object
+      required: [status]
+      additionalProperties: false
+      properties:
+        status: { $ref: '#/components/schemas/RequestStatus' }
+
+    RequestDetails:
+      description: |
+        Shape depends on `type`. The amount is what matching compares with a resource's
+        `capacity.remaining`. Omitted units are filled in by the server.
+      oneOf:
+        - $ref: '#/components/schemas/WaterDetails'
+        - $ref: '#/components/schemas/FoodDetails'
+        - $ref: '#/components/schemas/MedicineDetails'
+        - $ref: '#/components/schemas/TransportDetails'
+        - $ref: '#/components/schemas/ShelterDetails'
+    WaterDetails:
+      description: type WATER
+      type: object
+      required: [quantity]
+      additionalProperties: false
+      properties:
+        quantity: { type: number, exclusiveMinimum: true, minimum: 0, description: litres }
+        unit: { type: string, enum: [L], default: L }
+    FoodDetails:
+      description: type FOOD
+      type: object
+      required: [quantity]
+      additionalProperties: false
+      properties:
+        quantity: { type: integer, minimum: 1, description: meals }
+        unit: { type: string, enum: [MEALS], default: MEALS }
+    MedicineDetails:
+      description: type MEDICINE (must name the same medicine as the resource to match)
+      type: object
+      required: [name, quantity]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        quantity: { type: integer, minimum: 1 }
+    TransportDetails:
+      description: type TRANSPORT
+      type: object
+      required: [people]
+      additionalProperties: false
+      properties:
+        people: { type: integer, minimum: 1 }
+        start: { $ref: './common.yaml#/components/schemas/Location' }
+        destination: { $ref: './common.yaml#/components/schemas/Location' }
+    ShelterDetails:
+      description: type SHELTER
+      type: object
+      required: [people]
+      additionalProperties: false
+      properties:
+        people: { type: integer, minimum: 1 }
+
+    EmergencyRequest:
+      type: object
+      required: [requestId, type, location, geoCell, status, details, createdAt, updatedAt, version]
+      properties:
+        requestId: { type: string, format: uuid }
+        type: { $ref: './common.yaml#/components/schemas/Category' }
+        location: { $ref: './common.yaml#/components/schemas/Location' }
+        geoCell: { $ref: './common.yaml#/components/schemas/GeoCell' }
+        status: { $ref: '#/components/schemas/RequestStatus' }
+        requester: { $ref: '#/components/schemas/Requester' }
+        details: { $ref: '#/components/schemas/RequestDetails' }
+        assignedResourceId:
+          type: string
+          nullable: true
+          description: '`res_{geoCell}_{uuid}` once MATCHED, else null'
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        version:
+          type: integer
+          format: int64
+          description: Storage version; increases on every change.
+      example:
+        requestId: f3b1c2e4-0d1e-4a5b-9c8d-7e6f5a4b3c2d
+        type: WATER
+        location: { lat: 12.9716, lng: 77.5946 }
+        geoCell: tdr1v9
+        status: PENDING
+        requester: { name: Ravi Kumar, contact: '+91-90000-00000' }
+        details: { quantity: 20, unit: L }
+        assignedResourceId: null
+        createdAt: '2026-11-19T10:15:00Z'
+        updatedAt: '2026-11-19T10:15:00Z'
+        version: 1
