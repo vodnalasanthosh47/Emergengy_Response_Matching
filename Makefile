@@ -14,11 +14,18 @@ COMPOSE     := docker compose -f deploy/compose/docker-compose.yml
 COMPOSE_DEV := $(COMPOSE) -f deploy/compose/docker-compose.dev.yml
 
 .DEFAULT_GOAL := help
-K8S_DIR     := deploy/k8s/storage
+K8S_DIR     := deploy/k8s
+K8S_NS      := emergency
+K8S_SERVICES := request-service resource-service matching-service
+K8S_CPUS    ?= 6
+K8S_MEMORY  ?= 6800
+# Gateway API controller; pinned so every machine runs the same version.
+ENVOY_GATEWAY_VERSION ?= v1.9.3
 
 .PHONY: help build test test-go test-java images up up-dev down logs ps topology storage-smoke \
 	storage-failover storage-resilience storage-e2e request-smoke resource-smoke matching-smoke smoke \
-	k8s-images k8s-up k8s-down clean
+	k8s-start k8s-gateway-install k8s-images k8s-secrets k8s-up k8s-forward k8s-status k8s-down \
+	k8s-clean clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-17s\033[0m %s\n", $$1, $$2}'
@@ -93,18 +100,55 @@ matching-smoke: ## Matching end to end: event-driven match, no double booking, r
 
 smoke: request-smoke resource-smoke matching-smoke ## All service smoke tests through the gateway (CP1)
 
-k8s-images: images ## Load the images (and mongo:7.0) into Minikube
-	minikube image load $(IMAGE_REPO)/coordinator:local
-	minikube image load $(IMAGE_REPO)/storage-node:local
-	minikube image load mongo:7.0
+# ---- Kubernetes (Minikube) -----------------------------------------------------------
+# First time:  make k8s-start k8s-gateway-install k8s-images k8s-up
+# Then:        make k8s-forward   (in its own terminal) and run any smoke/e2e target.
 
-k8s-up: ## Deploy the storage tier to the current Kubernetes context (namespace emergency)
+k8s-start: ## Start Minikube with room for the whole system (6 CPUs, 6.8 GB)
+	minikube start --driver=docker --cpus=$(K8S_CPUS) --memory=$(K8S_MEMORY) --disk-size=30g
+
+k8s-gateway-install: ## Install Envoy Gateway (the Gateway API controller and CRDs); once per cluster
+	kubectl apply --server-side -f https://github.com/envoyproxy/gateway/releases/download/$(ENVOY_GATEWAY_VERSION)/install.yaml
+	kubectl -n envoy-gateway-system rollout status deploy/envoy-gateway --timeout=300s
+
+k8s-images: images ## Build the images and load them (and MongoDB, RabbitMQ if pulled) into Minikube
+	@set -e; for i in coordinator storage-node request-service resource-service matching-service; do \
+		echo "loading $(IMAGE_REPO)/$$i:local"; minikube image load $(IMAGE_REPO)/$$i:local; \
+	done
+	@# Third-party images: copy them if Docker has them, otherwise the cluster pulls them.
+	@for i in mongo:7.0 rabbitmq:4.1-management; do \
+		if docker image inspect $$i >/dev/null 2>&1; then echo "loading $$i"; minikube image load $$i; fi; \
+	done
+
+k8s-secrets: ## Create the RabbitMQ credentials Secret (values from deploy/compose/.env, else local defaults)
+	kubectl apply -f $(K8S_DIR)/namespace.yaml
+	@set -a; if [ -f deploy/compose/.env ]; then . deploy/compose/.env; fi; set +a; \
+	kubectl -n $(K8S_NS) create secret generic rabbitmq-credentials \
+		--from-literal=username="$${RABBITMQ_USER:-emergency}" \
+		--from-literal=password="$${RABBITMQ_PASSWORD:-emergency}" \
+		--dry-run=client -o yaml | kubectl apply -f -
+
+k8s-up: k8s-secrets ## Deploy everything to the current Kubernetes context and wait until it is ready
 	kubectl apply -k $(K8S_DIR)
-	kubectl -n emergency rollout status deploy/coordinator --timeout=180s
-	for s in 0 1 2; do kubectl -n emergency rollout status sts/storage-$$s --timeout=300s; done
+	kubectl -n $(K8S_NS) rollout status deploy/coordinator --timeout=180s
+	@set -e; for s in storage-0 storage-1 storage-2 rabbitmq; do kubectl -n $(K8S_NS) rollout status sts/$$s --timeout=300s; done
+	@set -e; for d in $(K8S_SERVICES); do kubectl -n $(K8S_NS) rollout status deploy/$$d --timeout=300s; done
+	kubectl -n $(K8S_NS) wait --for=condition=Programmed gateway/gateway --timeout=180s
 
-k8s-down: ## Remove the storage tier from Kubernetes (PVCs, i.e. data, are kept)
-	kubectl delete -k $(K8S_DIR) --ignore-not-found
+k8s-forward: ## Gateway on :8080, coordinator on :9090, RabbitMQ UI on :15672 (runs until Ctrl-C)
+	scripts/k8s-port-forward.sh
+
+k8s-status: ## Pods, Deployments, StatefulSets, Services and routes in namespace emergency
+	kubectl -n $(K8S_NS) get pods,deploy,sts,svc,pvc -o wide
+	kubectl -n $(K8S_NS) get gateway,httproute
+
+k8s-down: ## Remove the deployment but keep the namespace and its volumes (the data)
+	kubectl delete -k $(K8S_DIR)/gateway --ignore-not-found
+	kubectl delete -k $(K8S_DIR)/services --ignore-not-found
+	kubectl delete -k $(K8S_DIR)/storage --ignore-not-found
+
+k8s-clean: k8s-down ## Also delete the namespace with its volumes (deletes stored data!)
+	kubectl delete -f $(K8S_DIR)/namespace.yaml --ignore-not-found
 
 clean: ## Remove containers, the MongoDB data volumes and bin/  (deletes stored data!)
 	$(COMPOSE_DEV) down -v --remove-orphans
