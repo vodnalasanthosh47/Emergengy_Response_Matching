@@ -5,7 +5,7 @@
 
 GO          ?= go
 MVN         ?= mvn
-JAVA_SERVICES := request_service
+JAVA_SERVICES := request_service resource_service
 GIT_SHA     := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 IMAGE_REPO  ?= emergency
 GO_MODULES  := storage/coordinator storage/storage_node
@@ -17,7 +17,7 @@ COMPOSE_DEV := $(COMPOSE) -f deploy/compose/docker-compose.dev.yml
 K8S_DIR     := deploy/k8s/storage
 
 .PHONY: help build test test-go test-java images up up-dev down logs ps topology storage-smoke \
-	storage-failover storage-resilience storage-e2e request-smoke k8s-images k8s-up k8s-down clean
+	storage-failover storage-resilience storage-e2e request-smoke resource-smoke k8s-images k8s-up k8s-down clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-17s\033[0m %s\n", $$1, $$2}'
@@ -79,6 +79,9 @@ storage-e2e: storage-smoke storage-failover storage-resilience ## All storage en
 
 request-smoke: ## Request Service end to end through the gateway (needs `make up-dev`)
 	BASE_URL=$${BASE_URL:-http://localhost:8080} tests/e2e/request-smoke.sh
+
+resource-smoke: ## Resource Service end to end through the gateway (needs `make up-dev`)
+	BASE_URL=$${BASE_URL:-http://localhost:8080} tests/e2e/resource-smoke.sh
 
 k8s-images: images ## Load the images (and mongo:7.0) into Minikube
 	minikube image load $(IMAGE_REPO)/coordinator:local
