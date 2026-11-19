@@ -84,6 +84,7 @@ storage/coordinator/   Go — the only entry point to storage: sharding, replica
 storage/storage_node/  Go — one copy of one shard's records in a standalone MongoDB
 common/                Java — code the services share: storage client, geohash, shared types, events
 services/              Java / Spring Boot application services (request_service; resource, matching next)
+                       each has a README with its status and what is left (services/request_service/README.md)
 deploy/compose/        Docker Compose runtime and the nginx gateway
 deploy/k8s/storage/    Kubernetes manifests for the storage tier
 tests/e2e/             end-to-end scripts

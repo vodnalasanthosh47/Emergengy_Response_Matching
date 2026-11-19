@@ -5,7 +5,8 @@ on one service can see what the others rely on. **Whenever you change something 
 here, add a line to the change log at the bottom in the same PR** and tell the others.
 
 Related: `docs/data-format.md` (how records are stored), `contracts/` (the APIs and the
-event), `PROJECT_SPEC.md` (the plan).
+event), `PROJECT_SPEC.md` (the plan), and each service's README for its status and what
+is left (e.g. `services/request_service/README.md`).
 
 ---
 
