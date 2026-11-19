@@ -24,7 +24,8 @@ ENVOY_GATEWAY_VERSION ?= v1.9.3
 
 .PHONY: help build test test-go test-java images up up-dev down logs ps topology storage-smoke \
 	storage-failover storage-resilience storage-e2e request-smoke resource-smoke matching-smoke smoke \
-	k8s-start k8s-gateway-install k8s-images k8s-secrets k8s-up k8s-forward k8s-status k8s-down \
+	k8s-start k8s-gateway-install k8s-images k8s-secrets k8s-up k8s-forward k8s-status k8s-recovery \
+	k8s-scaling k8s-storage-failover k8s-e2e k8s-down \
 	k8s-clean clean
 
 help: ## Show this help
@@ -141,6 +142,17 @@ k8s-forward: ## Gateway on :8080, coordinator on :9090, RabbitMQ UI on :15672 (r
 k8s-status: ## Pods, Deployments, StatefulSets, Services and routes in namespace emergency
 	kubectl -n $(K8S_NS) get pods,deploy,sts,svc,pvc -o wide
 	kubectl -n $(K8S_NS) get gateway,httproute
+
+k8s-recovery: ## Delete/crash service pods under load: Kubernetes recovers them, no call fails (needs k8s-forward)
+	tests/e2e/k8s-pod-recovery.sh
+
+k8s-scaling: ## Scale a service 2 → 4 pods and back under load; new pods serve, no call fails (needs k8s-forward)
+	tests/e2e/k8s-scaling.sh
+
+k8s-storage-failover: ## Delete a storage primary pod: replica takes over, recreated pod syncs (needs k8s-forward)
+	MODE=k8s tests/e2e/storage-failover.sh
+
+k8s-e2e: smoke k8s-storage-failover k8s-recovery k8s-scaling ## Every Kubernetes check: smoke, storage failover, recovery, scaling
 
 k8s-down: ## Remove the deployment but keep the namespace and its volumes (the data)
 	kubectl delete -k $(K8S_DIR)/gateway --ignore-not-found

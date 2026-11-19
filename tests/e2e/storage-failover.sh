@@ -17,10 +17,10 @@
 #      including the writes made while it was down.
 #
 # Usage:  BASE_URL=http://localhost:9090 tests/e2e/storage-failover.sh
-#         MODE=k8s BASE_URL=http://localhost:9091 tests/e2e/storage-failover.sh
+#         MODE=k8s tests/e2e/storage-failover.sh      (Kubernetes: `make k8s-storage-failover`)
 # Needs:  bash 4+, curl, jq, python3 (macOS or Linux), and either the Compose stack
 #         (`make up-dev`; MODE=compose, the default) or the Kubernetes deployment
-#         (`make k8s-up`, then port-forward the coordinator; MODE=k8s). In Kubernetes
+#         (`make k8s-up`, then `make k8s-forward` for the coordinator on :9090; MODE=k8s). In Kubernetes
 #         mode a node is "stopped" by deleting its pod, and the StatefulSet recreates it
 #         automatically (with its volume).
 
