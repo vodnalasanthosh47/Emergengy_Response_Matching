@@ -86,7 +86,33 @@ Envoy 64 / 256 Mi. All of it fits in Minikube's 6.8 GB.
 | Pod failure and automatic recovery | `make k8s-recovery` | a deleted pod of each service is replaced in ~7 s; a killed JVM is restarted by the kubelet in ~5 s; ~130 calls per service during each, **none failed**; afterwards a request is MATCHED |
 | Scaling | `make k8s-scaling` (or `SERVICE=matching-service REPLICAS=3 tests/e2e/k8s-scaling.sh`) | 2 → 4 pods ready in ~7 s, the new pods serve calls at once, back to 2; ~300 calls, **none failed** |
 
-By hand, for the demo:
+### The demo script
+
+`make demo` (`scripts/demo.sh`) walks through PDF §10 in order, pausing before each
+step (Enter to run) and printing every call and its answer:
+
+| Step | What the audience sees |
+|---|---|
+| 0 | `kubectl get deploy,statefulset,pods,gateway,httproute` |
+| 1. Request creation | a SHELTER request is created (201, `PENDING`, server-computed `geoCell`) and read back: `UNMATCHED`, nothing nearby yet |
+| 2. Resource registration | 500 L of water and a 50-place shelter are registered close by |
+| 3. Matching | a 20 L water request goes through RabbitMQ and is `MATCHED` (500 → 480 L), with the Matching pod's log lines; then `POST /match/{id}` matches the step-1 shelter request (200) and refuses a second time (409) |
+| 4. Data distribution | records per shard before/after creating a resource and a request in six cities, with the shard of each key (`crc32 mod 3`) |
+| 5. Async processing | 8 simultaneous requests for 20 meals against 100 meals: exactly 5 `MATCHED`, 3 `UNMATCHED`, 0 left; which of the 2 Matching pods handled each event; queue counters |
+| 6. Storage failure | the primary pod of the shard holding the step-3 request is deleted; the replica is promoted (~2 s); reads and 6 new writes succeed |
+| 7. Node recovery | the StatefulSet recreates the pod (same name and volume); it re-registers as replica with the same record count |
+| 8. Kubernetes recovery | a Request Service pod is deleted; replacement ready in ~6 s; no call fails meanwhile |
+| 9. Kubernetes scaling | Request Service 2 → 4 pods, each new pod's share of 40 calls, back to 2; no call fails |
+
+`DEMO_PAUSE=0 make demo` runs straight through (it checks every result and exits
+non-zero on a problem, so it doubles as a rehearsal); `DEMO_FROM=6` starts at a step.
+Runs take a random spot near Bengaluru, so they do not interfere with each other.
+
+In Kubernetes a deleted storage pod is back within seconds (that is the StatefulSet doing
+its job). For a longer outage to talk over, the Compose version keeps the node stopped
+until it is started again: `make up-dev && make storage-failover`.
+
+By hand:
 
 ```bash
 kubectl -n emergency get pods -w                              # watch in another terminal

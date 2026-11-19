@@ -80,6 +80,7 @@ make k8s-start k8s-gateway-install   # once: Minikube (6 CPUs, 6.8 GB) and the G
 make k8s-images k8s-up               # load the images, deploy everything, wait until ready
 make k8s-forward                     # own terminal: gateway :8080, coordinator :9090, RabbitMQ UI :15672
 make k8s-e2e                         # smoke tests, storage failover, pod recovery, scaling
+make demo                            # the final demonstration (PDF §10), step by step
 ```
 
 Run `make help` for all targets.
@@ -95,7 +96,7 @@ services/              Java / Spring Boot application services (request_service,
                        each has a README with its status and what is left
 deploy/compose/        Docker Compose runtime and the nginx gateway
 deploy/k8s/            Kubernetes: storage/, services/ (RabbitMQ + 3 services), gateway/ (Gateway API)
-scripts/               helpers: k8s-port-forward.sh (make k8s-forward)
+scripts/               k8s-port-forward.sh (make k8s-forward), demo.sh (make demo)
 tests/e2e/             end-to-end scripts
 docs/data-format.md    how requests and resources are stored: keys, records, indexes (start here)
 docs/service-interfaces.md  what each service relies on from the others, and a change log
