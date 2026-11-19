@@ -49,13 +49,16 @@ Clients may not send `resourceId`, `geoCell` or `status` (unknown fields are `40
 
 | type | `capacity.unit` | amounts | `details` |
 |---|---|---|---|
-| WATER | `L` | decimal > 0 | `{}` |
+| WATER | `L` | decimal > 0, at most 3 decimal places | `{}` |
 | FOOD | `MEALS` | whole > 0 | `{}` |
 | MEDICINE | `UNITS` | whole > 0 | `{"name": text}`, required |
 | TRANSPORT | `PEOPLE` | whole > 0 | `{}` |
 | SHELTER | `PEOPLE` | whole > 0 | `{}` |
 
 The unit may be omitted (it is filled in); `remaining` must be `> 0` and `≤ total`.
+Every amount is at most 1,000,000 and must be a JSON number: `"500"` as text is `400`
+(storage keeps numbers as 64-bit floats, so e.g. `1e400` used to fail with a `500`).
+`1e3` is stored as `1000`.
 These are the units the Request Service uses for the amount it asks for, so matching
 can compare a request's amount with `capacity.remaining` directly.
 
@@ -138,10 +141,10 @@ make test-java          # all Java tests
 
 | Suite | What it proves |
 |---|---|
-| `ResourceValidatorTest` | units, defaults, whole vs decimal amounts, MEDICINE name, unknown details |
+| `ResourceValidatorTest` | units, defaults, whole vs decimal amounts, maximum and decimal places, `1e3` stored as `1000`, MEDICINE name, unknown details |
 | `ResourceServiceTest` | ID/cell/status generation, list filters and limit, every client transition, no-op, reserved DEPLETED, empty → AVAILABLE refused, conflict retry, storage down |
 | `CoordinatorResourceRepositoryTest` | exact key, value, indexes, `expectedVersion` and query body sent; storage outcomes → service exceptions |
-| `ResourceControllerTest` | status codes and error JSON for bad bodies, bad query parameters, 404/405/415/500 |
+| `ResourceControllerTest` | status codes and error JSON for bad bodies (including numbers sent as text), bad query parameters, 404/405/415/500 |
 | `ResourceServiceApplicationTest` | whole app over HTTP against a fake coordinator; 503 and not ready when storage is down |
 | `common`: `ResourceJsonTest`, `ResourceStatusTest` | stored JSON shape (integers stay integers), transition table |
 

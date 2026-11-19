@@ -4,7 +4,7 @@ The `/requests` API of the Emergency Resource Matching system (PROJECT_SPEC §4.
 §7.1-C; PDF §5 and §7). It accepts emergency requests, stores them through the storage
 coordinator, and announces each new request to the Matching Service over RabbitMQ.
 
-**Status (2026-11-19): done for Checkpoint 1.** All tests pass (130 Java + all Go), and
+**Status (2026-11-19): done for Checkpoint 1.** All tests pass (93 service + 47 `common` + all Go), and
 it runs end to end in Docker Compose against the real storage cluster and RabbitMQ.
 Branch `feat/request-service` (pushed, not merged into `main` yet). What is left is in
 [§9](#9-whats-left).
@@ -43,7 +43,8 @@ curl -X POST http://localhost:8080/requests -H 'Content-Type: application/json' 
 ```
 
 1. Validates `type`, `location` (lat −90..90, lng −180..180) and `details` for the
-   type. Unknown fields are rejected, including `geoCell`, `status` and `requestId`,
+   type. Numbers must be JSON numbers (`"12.97"` as text is rejected, as in every
+   service). Unknown fields are rejected, including `geoCell`, `status` and `requestId`,
    which only the server sets.
 2. Assigns a random UUID, computes `geoCell` = geohash of the location at precision 6
    (`tdr1v9` for the example), sets `status: PENDING`, `createdAt`/`updatedAt`.
@@ -166,17 +167,18 @@ repository root: `docker build -f services/request_service/Dockerfile .`
 
 ## 6. Tests
 
-`make test-java` (needs JDK 21 and Docker): **130 tests, all passing.**
+`make test-java` (needs JDK 21 and Docker; without Docker the RabbitMQ tests are
+*skipped*, so check the output for "Skipped"): **93 tests here + 47 in `common`, all passing.**
 
 | Suite | Tests | What it proves |
 |---|---|---|
 | `DetailsValidatorTest` | 28 | every per-type rule; normalisation; unknown fields rejected |
 | `RequestServiceTest` | 33 | create; compensation when publishing fails; storage down; every legal (7) and illegal (14) transition; reserved statuses; no-op; re-read on concurrent change; giving up after 3 conflicts |
-| `RequestControllerTest` | 20 | status codes and error JSON for 15 kinds of bad body, domain errors, 404/405/415, no internal details leaked |
+| `RequestControllerTest` | 22 | status codes and error JSON for 17 kinds of bad body (including numbers sent as text), domain errors, 404/405/415, no internal details leaked |
 | `StorageRequestRepositoryTest` | 3 | exact key, indexes and `expectedVersion` sent; storage outcomes → domain outcomes |
 | `RabbitRequestEventPublisherTest` | 4 | real RabbitMQ: routing key per type, persistent, message-id, body; missing exchange and dead broker → 503 |
 | `RequestServiceApplicationTest` | 3 | whole app with real RabbitMQ and a fake coordinator: create → stored → event → read → status; storage down → 503 and not ready; health and metrics |
-| `common` module | 39 | geohash against reference values, storage client against a mock coordinator, key formats, status table, JSON shapes |
+| `common` module | 47 | geohash against reference values, storage client against a mock coordinator, key formats, status tables, JSON shapes, numbers-as-text rule |
 
 End to end (`make request-smoke`, against the real Go storage cluster): creates all 5
 types, checks the stored record in the coordinator, checks the events through the

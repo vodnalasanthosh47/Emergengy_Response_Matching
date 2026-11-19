@@ -92,6 +92,7 @@ document never breaks another service that reads it. API input stays strict.
 | Versions | never stored inside the document; API responses add `version` from the record | docs/data-format.md §3.2 |
 | Errors | `{error, message, timestamp}`; codes `INVALID_REQUEST` 400, `NOT_FOUND` 404, `CONFLICT` 409, `NO_MATCH` 422, `SERVICE_UNAVAILABLE` 503, `INTERNAL_ERROR` 500 (`common.api.ErrorResponse`) | contracts/openapi/common.yaml |
 | Unknown JSON fields | rejected (400) in API bodies: `spring.jackson.deserialization.fail-on-unknown-properties: true` | each service's application.yml |
+| Numbers as text | rejected (400): `"500"` is not a number. `common.api.JsonStrictness`, applied by each service's `config/JacksonConfig` (controller tests must `@Import` it) | common, each service |
 | Config | env vars only: `SERVER_PORT`, `COORDINATOR_URL`, `RABBITMQ_*`, `GEOHASH_PRECISION` | spec §6 |
 | Health | `/actuator/health/liveness`, `/actuator/health/readiness` (include `storage`), `/actuator/prometheus` | request service's application.yml |
 
@@ -182,6 +183,9 @@ Newest first. Anything that changes an interface above gets a line.
 
 | Date | Who | Change | Affects |
 |---|---|---|---|
+| 2026-11-19 | Request branch | Numbers sent as text (`"500"`, `"12.97"`) are now 400 in every service (`common.api.JsonStrictness` + `config/JacksonConfig` in each service; a new service must add the same config) | everyone |
+| 2026-11-19 | Request branch | Resource capacity amounts: at most 1,000,000 and 3 decimal places (`1e400` was a 500); `1e3` stored as `1000` | Resource, Matching |
+| 2026-11-19 | Request branch | Storage e2e scripts now delete the raw test records they create (they used to appear in `GET /resources` and broke `resource-smoke` on a shared stack) | everyone running e2e tests |
 | 2026-11-19 | Resource branch | Added `common.resource` (`ResourceDocument`, `ResourceView`, `ResourceStatus`, `Capacity`, `Provider`, `ProviderKind`), the Resource API (contracts/openapi/resource-service-api.yaml), and the `/resources` gateway route | Matching |
 | 2026-11-19 | Resource branch | Resource `capacity.unit` per type agreed (L, MEALS, UNITS, PEOPLE) and implemented | Request, Matching |
 | 2026-11-19 | Request branch | Added `common` (storage client, keys, geohash, categories, error JSON, request types, `RequestCreated`), root Maven build, RabbitMQ + gateway in Compose | everyone |
