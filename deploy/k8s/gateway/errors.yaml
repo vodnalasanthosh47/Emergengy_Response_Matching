@@ -1,0 +1,37 @@
+# Errors made by the gateway itself use the same JSON as the services (spec §4.1):
+#     { "error": "...", "message": "...", "timestamp": "..." }
+#
+# Envoy's own error replies are plain text: "no healthy upstream" (503) while a
+# service has no ready pod, upstream timeouts (504), connection failures (502), and the
+# 404 of routes.yaml. The services always answer with application/json, so matching on
+# Content-Type text/plain rewrites only the gateway's errors; a service's own 503 or
+# 404 passes through with its more specific message.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: gateway-errors
+  namespace: emergency
+spec:
+  targetRefs:
+    - { group: gateway.networking.k8s.io, kind: Gateway, name: gateway }
+  responseOverride:
+    - match:
+        statusCodes: [{ type: Value, value: 404 }]
+        responseHeaders: [{ name: content-type, value: { type: Prefix, value: text/plain } }]
+      response:
+        contentType: application/json
+        body:
+          type: Inline
+          inline: '{"error":"NOT_FOUND","message":"no such endpoint","timestamp":"%START_TIME(%Y-%m-%dT%H:%M:%SZ)%"}'
+    - match:
+        statusCodes:
+          - { type: Value, value: 502 }
+          - { type: Value, value: 503 }
+          - { type: Value, value: 504 }
+        responseHeaders: [{ name: content-type, value: { type: Prefix, value: text/plain } }]
+      response:
+        statusCode: 503
+        contentType: application/json
+        body:
+          type: Inline
+          inline: '{"error":"SERVICE_UNAVAILABLE","message":"service unavailable, retry later","timestamp":"%START_TIME(%Y-%m-%dT%H:%M:%SZ)%"}'
