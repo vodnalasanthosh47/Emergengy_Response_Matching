@@ -1,0 +1,61 @@
+# How the gateway treats traffic to the services: one Envoy Gateway policy for the whole
+# Gateway (only one BackendTrafficPolicy may target it).
+#
+# 1. A crashed pod gets no more traffic, and calls that could not reach it are retried
+#    on another pod. When a container dies, Kubernetes only stops sending it traffic
+#    after its readiness probe fails (up to ~15 s). Meanwhile:
+#    - retry: if Envoy cannot connect (connection refused, stream refused), it retries
+#      on another pod. Safe even for POST: the request never reached a service. Errors
+#      after the service received the request are NOT retried (it may have acted).
+#    - passive health check: one connection failure takes that pod out of rotation for
+#      10 s (at most half of a service's pods), so later calls skip it straight away.
+#
+# 2. Errors made by the gateway itself use the same JSON as the services (spec §4.1):
+#        { "error": "...", "message": "...", "timestamp": "..." }
+#    Envoy's own error replies are plain text: "no healthy upstream" (503) while a
+#    service has no ready pod, upstream timeouts (504), connection failures (502), and
+#    the 404 of routes.yaml. The services always answer with application/json, so
+#    matching on Content-Type text/plain rewrites only the gateway's errors; a service's
+#    own 503 or 404 passes through with its more specific message.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: gateway-traffic
+  namespace: emergency
+spec:
+  targetRefs:
+    - { group: gateway.networking.k8s.io, kind: Gateway, name: gateway }
+  retry:
+    numRetries: 2
+    retryOn:
+      triggers: [connect-failure, refused-stream]
+    perRetry:
+      backOff: { baseInterval: 50ms, maxInterval: 500ms }
+  healthCheck:
+    passive:
+      splitExternalLocalOriginErrors: true # count connection failures on their own
+      consecutiveLocalOriginFailures: 1
+      interval: 2s
+      baseEjectionTime: 10s
+      maxEjectionPercent: 50
+  responseOverride:
+    - match:
+        statusCodes: [{ type: Value, value: 404 }]
+        responseHeaders: [{ name: content-type, value: { type: Prefix, value: text/plain } }]
+      response:
+        contentType: application/json
+        body:
+          type: Inline
+          inline: '{"error":"NOT_FOUND","message":"no such endpoint","timestamp":"%START_TIME(%Y-%m-%dT%H:%M:%SZ)%"}'
+    - match:
+        statusCodes:
+          - { type: Value, value: 502 }
+          - { type: Value, value: 503 }
+          - { type: Value, value: 504 }
+        responseHeaders: [{ name: content-type, value: { type: Prefix, value: text/plain } }]
+      response:
+        statusCode: 503
+        contentType: application/json
+        body:
+          type: Inline
+          inline: '{"error":"SERVICE_UNAVAILABLE","message":"service unavailable, retry later","timestamp":"%START_TIME(%Y-%m-%dT%H:%M:%SZ)%"}'

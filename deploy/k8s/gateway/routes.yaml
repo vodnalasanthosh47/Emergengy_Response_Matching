@@ -2,7 +2,7 @@
 #     /requests  → request-service      /resources → resource-service
 #     /match     → matching-service     /healthz   → answered by the gateway itself
 # PathPrefix matches whole path segments: /requests and /requests/{id}, not /requestsXYZ.
-# Anything else gets a 404, turned into the standard error JSON by errors.yaml.
+# Anything else gets a 404, turned into the standard error JSON by traffic.yaml.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -68,7 +68,7 @@ spec:
     contentType: application/json
     body: { type: Inline, inline: '{"status":"ok"}' }
 ---
-# Plain text on purpose: errors.yaml rewrites the gateway's own text/plain errors into
+# Plain text on purpose: traffic.yaml rewrites the gateway's own text/plain errors into
 # the standard error JSON (with a timestamp, which a fixed body could not have).
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: HTTPRouteFilter
