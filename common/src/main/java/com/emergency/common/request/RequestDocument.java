@@ -34,4 +34,14 @@ public record RequestDocument(
         return new RequestDocument(requestId, type, location, geoCell, newStatus, requester, details,
                 assignedResourceId, createdAt, now);
     }
+
+    /**
+     * A copy that is MATCHED to {@code resourceId} (client form {@code res_{cell}_{uuid}}).
+     * Status and assignment change together, in one write, so a MATCHED request always
+     * names its resource. Used by the Matching Service.
+     */
+    public RequestDocument matchedTo(String resourceId, Instant now) {
+        return new RequestDocument(requestId, type, location, geoCell, RequestStatus.MATCHED, requester, details,
+                resourceId, createdAt, now);
+    }
 }
