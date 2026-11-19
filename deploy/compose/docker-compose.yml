@@ -5,7 +5,9 @@
 #                 │ /requests                          │ /resources
 #                 ▼                                    ▼
 #             request-service ──publish──► rabbitmq   resource-service
-#                 │ /v1/data      (matching-service, next) │ /v1/data, /v1/query
+#                 │ /v1/data            │ consume          │ /v1/data, /v1/query
+#                 │                     ▼                  │
+#                 │             matching-service (/match) ─┤ claims resources, marks requests
 #                 ▼◄───────────────────────────────────────┘
 #             coordinator ◄──register/heartbeat── storage-{0,1,2}-{a,b} ──driver──► mongo-{0,1,2}-{a,b}
 #                         ──/internal/...──────►
@@ -107,6 +109,7 @@ services:
     depends_on:
       request-service: { condition: service_healthy }
       resource-service: { condition: service_healthy }
+      matching-service: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
       interval: 10s
@@ -153,6 +156,30 @@ services:
     depends_on:
       coordinator: { condition: service_healthy }
     healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 60s
+      start_interval: 2s
+
+  matching-service:
+    image: emergency/matching-service:${IMAGE_TAG:-local}
+    environment:
+      SERVER_PORT: "8080"
+      COORDINATOR_URL: http://coordinator:8080
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: ${RABBITMQ_USER:-emergency}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-emergency}
+    networks: [services]
+    mem_limit: 512m
+    restart: unless-stopped
+    depends_on:
+      coordinator: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    healthcheck:
+      # Ready = RabbitMQ (its queue is declared) and the coordinator reachable.
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]
       interval: 10s
       timeout: 3s

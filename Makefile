@@ -5,7 +5,7 @@
 
 GO          ?= go
 MVN         ?= mvn
-JAVA_SERVICES := request_service resource_service
+JAVA_SERVICES := request_service resource_service matching_service
 GIT_SHA     := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 IMAGE_REPO  ?= emergency
 GO_MODULES  := storage/coordinator storage/storage_node
@@ -17,7 +17,8 @@ COMPOSE_DEV := $(COMPOSE) -f deploy/compose/docker-compose.dev.yml
 K8S_DIR     := deploy/k8s/storage
 
 .PHONY: help build test test-go test-java images up up-dev down logs ps topology storage-smoke \
-	storage-failover storage-resilience storage-e2e request-smoke resource-smoke k8s-images k8s-up k8s-down clean
+	storage-failover storage-resilience storage-e2e request-smoke resource-smoke matching-smoke smoke \
+	k8s-images k8s-up k8s-down clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-17s\033[0m %s\n", $$1, $$2}'
@@ -48,11 +49,15 @@ images: ## Build Docker images tagged with the git SHA and "local"
 		docker build -f services/$$s/Dockerfile -t $(IMAGE_REPO)/$$name:$(GIT_SHA) -t $(IMAGE_REPO)/$$name:local .; \
 	done
 
+# The gateway's nginx.conf is a mounted file: if the gateway was already running, a changed
+# config (e.g. a new route) is only picked up after a reload, so `up` always reloads it.
 up: ## Start the stack and wait until every container is healthy
 	$(COMPOSE) up -d --wait
+	$(COMPOSE) exec -T gateway nginx -s reload
 
 up-dev: ## Like `up`, plus the coordinator on 127.0.0.1:9090 and RabbitMQ's UI on 127.0.0.1:15672
 	$(COMPOSE_DEV) up -d --wait
+	$(COMPOSE_DEV) exec -T gateway nginx -s reload
 
 down: ## Stop and remove the containers (data volume is kept)
 	$(COMPOSE_DEV) down
@@ -82,6 +87,11 @@ request-smoke: ## Request Service end to end through the gateway (needs `make up
 
 resource-smoke: ## Resource Service end to end through the gateway (needs `make up-dev`)
 	BASE_URL=$${BASE_URL:-http://localhost:8080} tests/e2e/resource-smoke.sh
+
+matching-smoke: ## Matching end to end: event-driven match, no double booking, redelivery, POST /match
+	BASE_URL=$${BASE_URL:-http://localhost:8080} tests/e2e/matching-smoke.sh
+
+smoke: request-smoke resource-smoke matching-smoke ## All service smoke tests through the gateway (CP1)
 
 k8s-images: images ## Load the images (and mongo:7.0) into Minikube
 	minikube image load $(IMAGE_REPO)/coordinator:local
