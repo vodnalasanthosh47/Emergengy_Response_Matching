@@ -18,7 +18,8 @@ Client → Gateway → Request Service → RabbitMQ → Matching Service → Coo
 | Storage tier on Kubernetes (`deploy/k8s/storage/`) | done |
 | `common` Java module (storage client, geohash, shared types), RabbitMQ, nginx gateway | done |
 | Request Service (`services/request_service`) | done |
-| Resource Service, Matching Service | in progress |
+| Resource Service (`services/resource_service`) | done |
+| Matching Service | in progress |
 
 ### Storage tier against the problem statement
 
@@ -58,6 +59,7 @@ make images            # build images tagged <git-sha> and local
 make up-dev            # gateway on :8080, request service, RabbitMQ (UI on 127.0.0.1:15672),
                        # coordinator (127.0.0.1:9090) + 3 shards × 2 nodes
 make request-smoke     # Request Service end to end through the gateway
+make resource-smoke    # Resource Service end to end through the gateway (incl. shard placement)
 make topology          # shards, primaries, node states, record counts
 make storage-smoke     # data API checks through the coordinator
 make storage-failover  # distribution, then stop a primary, keep working, restart it, verify sync
@@ -83,8 +85,8 @@ contracts/openapi/     language-neutral API contracts (the source of truth betwe
 storage/coordinator/   Go — the only entry point to storage: sharding, replication, failover, recovery
 storage/storage_node/  Go — one copy of one shard's records in a standalone MongoDB
 common/                Java — code the services share: storage client, geohash, shared types, events
-services/              Java / Spring Boot application services (request_service; resource, matching next)
-                       each has a README with its status and what is left (services/request_service/README.md)
+services/              Java / Spring Boot application services (request_service, resource_service; matching next)
+                       each has a README with its status and what is left
 deploy/compose/        Docker Compose runtime and the nginx gateway
 deploy/k8s/storage/    Kubernetes manifests for the storage tier
 tests/e2e/             end-to-end scripts
