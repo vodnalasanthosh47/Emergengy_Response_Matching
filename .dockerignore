@@ -1,0 +1,13 @@
+# Build context for the Java service images (they build from the repo root to reach
+# `common`). The Go images build from their own folders and do not use this file.
+.git
+**/target
+**/.DS_Store
+storage
+deploy
+docs
+tests
+contracts
+bin
+*.md
+.env

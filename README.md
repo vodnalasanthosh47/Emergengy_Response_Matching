@@ -16,7 +16,11 @@ Client → Gateway → Request Service → RabbitMQ → Matching Service → Coo
 | Storage tier: coordinator + **3 shards × (primary + replica)** on MongoDB (`storage/`) | done |
 | Geohash sharding, replicated writes, heartbeats, failover, recovery sync | done |
 | Storage tier on Kubernetes (`deploy/k8s/storage/`) | done |
-| Java services (request, resource, matching), RabbitMQ, nginx gateway | next |
+| `common` Java module (storage client, geohash, shared types), RabbitMQ, nginx gateway | done |
+| Request Service (`services/request_service`) | done |
+| Resource Service (`services/resource_service`) | done |
+| Matching Service (`services/matching_service`) | done |
+| Kubernetes manifests for the Java services, Gateway API (CP2) | next |
 
 ### Storage tier against the problem statement
 
@@ -37,18 +41,28 @@ Client → Gateway → Request Service → RabbitMQ → Matching Service → Coo
   `export PATH="$HOME/sdk/go1.27.4/bin:$HOME/go/bin:$PATH"` (add it to `~/.bashrc`).
 - **Docker** with Compose v2.20+ (for `up --wait`). The Go integration tests also use
   Docker, via testcontainers.
-- JDK 21 + Maven (Java services, coming next).
+- **JDK 21 + Maven 3.9** (Java services; Spring Boot 4.1). If `mvn -v` shows another
+  Java, point `JAVA_HOME` at a JDK 21 (macOS: `export JAVA_HOME=$(/usr/libexec/java_home -v 21)`).
+  The Java integration tests start RabbitMQ in Docker (Testcontainers).
 - For the end-to-end scripts: bash 4+ (macOS: `brew install bash`), `curl`, `jq`, `python3`.
-- Laptop: about 2.5 GB free RAM for the storage tier (6 MongoDB instances, each capped at 384 MB).
+- Laptop: about 3.5 GB free RAM for the whole stack (6 MongoDB instances at 384 MB each,
+  RabbitMQ and each Java service at 512 MB).
+- Optional: copy `deploy/compose/.env.example` to `deploy/compose/.env` to set your own
+  RabbitMQ credentials (local defaults are used otherwise).
 - MongoDB **7.0** is used everywhere: MongoDB 8 refuses to start on Linux kernels
   6.19.0–7.0.13 (SERVER-121912).
 
-## Quickstart (storage tier)
+## Quickstart
 
 ```bash
-make test              # go vet + go test -race (starts a throwaway MongoDB container)
+make test              # Go (vet + race, throwaway MongoDB) and Java (mvn verify, throwaway RabbitMQ)
 make images            # build images tagged <git-sha> and local
-make up-dev            # coordinator + 3 shards × 2 nodes (+ their MongoDBs); coordinator on 127.0.0.1:9090
+make up-dev            # gateway on :8080, request service, RabbitMQ (UI on 127.0.0.1:15672),
+                       # coordinator (127.0.0.1:9090) + 3 shards × 2 nodes
+make request-smoke     # Request Service end to end through the gateway
+make resource-smoke    # Resource Service end to end through the gateway (incl. shard placement)
+make matching-smoke    # request → RabbitMQ → matching → MATCHED; no double booking; redelivery
+make smoke             # all three service smoke tests (spec §7.1-H)
 make topology          # shards, primaries, node states, record counts
 make storage-smoke     # data API checks through the coordinator
 make storage-failover  # distribution, then stop a primary, keep working, restart it, verify sync
@@ -73,11 +87,14 @@ Run `make help` for all targets.
 contracts/openapi/     language-neutral API contracts (the source of truth between Go and Java)
 storage/coordinator/   Go — the only entry point to storage: sharding, replication, failover, recovery
 storage/storage_node/  Go — one copy of one shard's records in a standalone MongoDB
-services/              Java / Spring Boot application services (next)
-deploy/compose/        Docker Compose runtime
+common/                Java — code the services share: storage client, geohash, shared types, events
+services/              Java / Spring Boot application services (request_service, resource_service, matching_service)
+                       each has a README with its status and what is left
+deploy/compose/        Docker Compose runtime and the nginx gateway
 deploy/k8s/storage/    Kubernetes manifests for the storage tier
-tests/e2e/             smoke tests
+tests/e2e/             end-to-end scripts
 docs/data-format.md    how requests and resources are stored: keys, records, indexes (start here)
+docs/service-interfaces.md  what each service relies on from the others, and a change log
 docs/adr/              architecture decision records
 ```
 

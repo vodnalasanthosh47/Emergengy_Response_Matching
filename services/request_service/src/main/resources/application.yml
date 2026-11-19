@@ -1,0 +1,46 @@
+# All settings come from environment variables (spec §6) with local defaults, so the same
+# image runs under Docker Compose now and Kubernetes later.
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful            # finish in-flight requests on SIGTERM
+
+spring:
+  application:
+    name: request-service
+  jackson:
+    deserialization:
+      # A typo in a field name must be an error, not silently ignored (e.g. "quantitiy").
+      fail-on-unknown-properties: true
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USER:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+    connection-timeout: 3s
+    # "simple" publisher confirms: RabbitRequestEventPublisher waits for the broker's ack.
+    publisher-confirm-type: simple
+    publisher-returns: true
+    template:
+      mandatory: true
+
+emergency:
+  coordinator-url: ${COORDINATOR_URL:http://localhost:9090}
+  storage-timeout: ${STORAGE_TIMEOUT:10s}
+  geohash-precision: ${GEOHASH_PRECISION:6}
+  publish-confirm-timeout: ${PUBLISH_CONFIRM_TIMEOUT:5s}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true           # /actuator/health/liveness and /actuator/health/readiness
+      group:
+        readiness:
+          include: readinessState,rabbit,storage
+  metrics:
+    tags:
+      application: request-service

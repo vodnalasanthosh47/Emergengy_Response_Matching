@@ -1,9 +1,11 @@
 # Developer entry points. Run `make help` for the list.
 #
-# Currently covers the Go storage tier; the Maven build of the Java services is added
-# to build/test/images when those services land.
+# Covers the Go storage tier and the Java services (Maven, JDK 21: set JAVA_HOME to a
+# JDK 21 if `mvn -v` shows another version).
 
 GO          ?= go
+MVN         ?= mvn
+JAVA_SERVICES := request_service resource_service matching_service
 GIT_SHA     := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 IMAGE_REPO  ?= emergency
 GO_MODULES  := storage/coordinator storage/storage_node
@@ -14,33 +16,48 @@ COMPOSE_DEV := $(COMPOSE) -f deploy/compose/docker-compose.dev.yml
 .DEFAULT_GOAL := help
 K8S_DIR     := deploy/k8s/storage
 
-.PHONY: help build test images up up-dev down logs ps topology storage-smoke storage-failover \
-	storage-resilience storage-e2e k8s-images k8s-up k8s-down clean
+.PHONY: help build test test-go test-java images up up-dev down logs ps topology storage-smoke \
+	storage-failover storage-resilience storage-e2e request-smoke resource-smoke matching-smoke smoke \
+	k8s-images k8s-up k8s-down clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-17s\033[0m %s\n", $$1, $$2}'
 
-build: ## Compile the Go components into bin/
+build: ## Compile the Go components into bin/ and package the Java services
 	cd storage/coordinator  && $(GO) build -o ../../bin/coordinator  ./cmd/coordinator
 	cd storage/storage_node && $(GO) build -o ../../bin/storage-node ./cmd/storage-node
+	$(MVN) -B -q -DskipTests package
 
-test: ## Vet and run all Go tests with the race detector (integration tests need Docker)
+test: test-go test-java ## All tests: Go (vet + race) and Java (mvn verify); integration tests need Docker
+
+test-go: ## Vet and run all Go tests with the race detector
 	@set -e; for m in $(GO_MODULES); do \
 		echo "==> $$m"; \
 		(cd $$m && $(GO) vet ./... && $(GO) test -race ./...); \
 	done
+
+test-java: ## Run all Java tests (unit, web layer, and RabbitMQ via Testcontainers)
+	$(MVN) -B verify
 
 # Every image gets two tags: the git short SHA (immutable, what CP2 loads into
 # Minikube) and "local" (what docker-compose.yml uses by default).
 images: ## Build Docker images tagged with the git SHA and "local"
 	docker build -t $(IMAGE_REPO)/coordinator:$(GIT_SHA)  -t $(IMAGE_REPO)/coordinator:local  storage/coordinator
 	docker build -t $(IMAGE_REPO)/storage-node:$(GIT_SHA) -t $(IMAGE_REPO)/storage-node:local storage/storage_node
+	@set -e; for s in $(JAVA_SERVICES); do \
+		name=$$(echo $$s | tr _ -); \
+		docker build -f services/$$s/Dockerfile -t $(IMAGE_REPO)/$$name:$(GIT_SHA) -t $(IMAGE_REPO)/$$name:local .; \
+	done
 
+# The gateway's nginx.conf is a mounted file: if the gateway was already running, a changed
+# config (e.g. a new route) is only picked up after a reload, so `up` always reloads it.
 up: ## Start the stack and wait until every container is healthy
 	$(COMPOSE) up -d --wait
+	$(COMPOSE) exec -T gateway nginx -s reload
 
-up-dev: ## Like `up`, but also publish the coordinator on 127.0.0.1:9090 (3 shards × 2 nodes)
+up-dev: ## Like `up`, plus the coordinator on 127.0.0.1:9090 and RabbitMQ's UI on 127.0.0.1:15672
 	$(COMPOSE_DEV) up -d --wait
+	$(COMPOSE_DEV) exec -T gateway nginx -s reload
 
 down: ## Stop and remove the containers (data volume is kept)
 	$(COMPOSE_DEV) down
@@ -64,6 +81,17 @@ storage-resilience: ## Concurrent claims, MongoDB failure, coordinator and full 
 	BASE_URL=$${BASE_URL:-http://localhost:9090} tests/e2e/storage-resilience.sh
 
 storage-e2e: storage-smoke storage-failover storage-resilience ## All storage end-to-end tests (needs `make up-dev`)
+
+request-smoke: ## Request Service end to end through the gateway (needs `make up-dev`)
+	BASE_URL=$${BASE_URL:-http://localhost:8080} tests/e2e/request-smoke.sh
+
+resource-smoke: ## Resource Service end to end through the gateway (needs `make up-dev`)
+	BASE_URL=$${BASE_URL:-http://localhost:8080} tests/e2e/resource-smoke.sh
+
+matching-smoke: ## Matching end to end: event-driven match, no double booking, redelivery, POST /match
+	BASE_URL=$${BASE_URL:-http://localhost:8080} tests/e2e/matching-smoke.sh
+
+smoke: request-smoke resource-smoke matching-smoke ## All service smoke tests through the gateway (CP1)
 
 k8s-images: images ## Load the images (and mongo:7.0) into Minikube
 	minikube image load $(IMAGE_REPO)/coordinator:local

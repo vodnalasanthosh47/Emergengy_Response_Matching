@@ -21,9 +21,21 @@ BASE_URL="${BASE_URL:-http://localhost:9090}"
 PROJECT="${COMPOSE_PROJECT:-emergency}"
 RUN="$(date +%s)-${RANDOM}"
 TMP="$(mktemp -d)"
-# ${TMP:?} aborts instead of expanding to an empty path, so the cleanup can only ever
-# remove this script's own temporary directory.
-trap 'rm -rf -- "${TMP:?}"' EXIT
+KEY="" KEY2="" KEY3="" # the test records, set below
+
+# On exit, delete the test records (they are raw records under real resource keys and
+# would otherwise appear in GET /resources) and the temporary directory. A deleted record
+# becomes a tombstone, which queries never return. Best effort: errors are ignored.
+# ${TMP:?} aborts instead of expanding to an empty path, so only this script's own
+# temporary directory can ever be removed.
+cleanup() {
+  local k
+  for k in "$KEY" "$KEY2" "$KEY3"; do
+    [[ -n "$k" ]] && curl -s -o /dev/null -X DELETE "${BASE_URL}/v1/data/${k}" || true
+  done
+  rm -rf -- "${TMP:?}"
+}
+trap cleanup EXIT
 
 BODY_FILE="$TMP/body"
 STATUS=""
@@ -143,6 +155,14 @@ after=$(total_records)
 call GET "/v1/data/${KEY}"
 [[ "$STATUS" == 200 && "$(jq .version "$BODY_FILE")" == 2 ]] || fail "claimed record lost or changed after restart"
 ok "all $after records survived a full restart (data is on the MongoDB volumes)"
+
+step "Cleanup"
+for k in "$KEY" "$KEY2" "$KEY3"; do
+  call DELETE "/v1/data/$k"
+  [[ "$STATUS" == 204 ]] || fail "delete test record $k: HTTP $STATUS"
+done
+(( $(total_records) == before - 3 )) || fail "test records still counted after cleanup"
+ok "3 test records removed; none left in any listing"
 
 echo
 echo "PASS: storage resilience test"

@@ -1,0 +1,86 @@
+openapi: 3.0.3
+info:
+  title: Matching Service API
+  version: 1.0.0
+  description: |
+    Finds and claims a resource for an emergency request (PROJECT_SPEC §4.1, §5; PDF §7).
+    Reached through the gateway at `/match`.
+
+    The same algorithm runs in two ways:
+    - **asynchronously**, for every `RequestCreated` event on the queue
+      `matching.request-created` (contracts/events/request-created.v1.json);
+    - **synchronously**, through `POST /match/{requestId}` (e.g. to retry an UNMATCHED
+      request after new resources were registered).
+
+    Algorithm (spec §5):
+    1. Re-read the request from storage; only `PENDING` and `UNMATCHED` requests are
+       matched (so a redelivered event or a repeated call never claims twice).
+    2. Candidates: resources of the same type with `status: AVAILABLE` in the request's
+       geohash cell and its 8 neighbours.
+    3. Keep those whose `capacity.remaining` covers the request's amount (MEDICINE: same
+       name, compared case-insensitively).
+    4. Rank by distance (haversine), then by most remaining capacity, then by ID.
+    5. Claim the best one with a conditional write (`expectedVersion`): remaining minus
+       the amount, `DEPLETED` at 0. A conflict re-reads that resource and tries again or
+       moves on; at most 5 claim attempts in total.
+    6. Mark the request `MATCHED` with `assignedResourceId` (conditional write). If the
+       request changed meanwhile (e.g. it was cancelled), the claimed capacity is given
+       back (compensating write).
+    7. No candidate: the request becomes `UNMATCHED`.
+
+    RabbitMQ topology owned by this service: queue `matching.request-created` (durable,
+    bound to `emergency.events` with `request.created.*`, dead-letter exchange
+    `emergency.dlx`), and the dead-letter queue `matching.request-created.dlq`.
+servers:
+  - url: http://localhost:8080
+    description: Through the local gateway
+
+paths:
+  /match/{requestId}:
+    parameters:
+      - name: requestId
+        in: path
+        required: true
+        description: The request's UUID (anything else is `400`).
+        schema: { type: string, format: uuid }
+    post:
+      summary: Match a request now
+      operationId: matchRequest
+      responses:
+        '200':
+          description: A resource was claimed and the request is now MATCHED.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MatchResult' }
+        '400': { $ref: './common.yaml#/components/responses/BadRequest' }
+        '404': { $ref: './common.yaml#/components/responses/NotFound' }
+        '409':
+          description: |
+            The request is not matchable (`CONFLICT`): it is already MATCHED, IN_PROGRESS,
+            FULFILLED or CANCELLED.
+          content:
+            application/json:
+              schema: { $ref: './common.yaml#/components/schemas/Error' }
+        '422':
+          description: |
+            No available resource can serve the request (`NO_MATCH`). The request is now
+            `UNMATCHED`; it can be matched again later.
+          content:
+            application/json:
+              schema: { $ref: './common.yaml#/components/schemas/Error' }
+        '503': { $ref: './common.yaml#/components/responses/Unavailable' }
+
+components:
+  schemas:
+    MatchResult:
+      type: object
+      required: [requestId, resourceId, distanceKm, request, resource]
+      properties:
+        requestId: { type: string, format: uuid }
+        resourceId: { type: string, example: res_tdr1v9_8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77 }
+        distanceKm:
+          type: number
+          description: Haversine distance between the request and the resource.
+          example: 0.56
+        request: { $ref: './request-service-api.yaml#/components/schemas/EmergencyRequest' }
+        resource: { $ref: './resource-service-api.yaml#/components/schemas/Resource' }

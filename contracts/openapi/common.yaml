@@ -1,0 +1,74 @@
+openapi: 3.0.3
+info:
+  title: Shared public API components
+  version: 1.0.0
+  description: |
+    Schemas used by more than one public service API (request, resource, matching).
+    Each service's own contract references them with
+    `$ref: './common.yaml#/components/schemas/<Name>'`.
+
+    Changing anything here affects every service: announce it in
+    `docs/service-interfaces.md` (change log) before merging.
+paths: {}
+components:
+  schemas:
+    Category:
+      type: string
+      description: |
+        The kind of help. Requests and resources use the same categories; that is what
+        matching joins on. A volunteer or NGO is a provider, not a category.
+      enum: [WATER, FOOD, MEDICINE, TRANSPORT, SHELTER]
+
+    Location:
+      type: object
+      required: [lat, lng]
+      additionalProperties: false
+      properties:
+        lat: { type: number, format: double, minimum: -90, maximum: 90, example: 12.9716 }
+        lng: { type: number, format: double, minimum: -180, maximum: 180, example: 77.5946 }
+
+    GeoCell:
+      type: string
+      description: |
+        Geohash of a location at precision `GEOHASH_PRECISION` (default 6), computed by
+        the server; clients never send it. See docs/data-format.md.
+      pattern: '^[0123456789bcdefghjkmnpqrstuvwxyz]{1,12}$'
+      example: tdr1v9
+
+    Error:
+      type: object
+      required: [error, message, timestamp]
+      properties:
+        error:
+          type: string
+          description: |
+            `INVALID_REQUEST` (400), `NOT_FOUND` (404), `CONFLICT` (409),
+            `NO_MATCH` (422, matching only), `SERVICE_UNAVAILABLE` (503),
+            `INTERNAL_ERROR` (500).
+          enum: [INVALID_REQUEST, NOT_FOUND, CONFLICT, NO_MATCH, SERVICE_UNAVAILABLE, INTERNAL_ERROR]
+        message: { type: string, example: 'details.quantity must be > 0' }
+        timestamp: { type: string, format: date-time }
+
+  responses:
+    BadRequest:
+      description: Validation failed (`INVALID_REQUEST`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: No such entity (`NOT_FOUND`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: The entity's current state does not allow this (`CONFLICT`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unavailable:
+      description: |
+        A dependency (storage coordinator or RabbitMQ) is unreachable
+        (`SERVICE_UNAVAILABLE`). Safe to retry.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }

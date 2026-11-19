@@ -1,5 +1,6 @@
-# Development-only override: publishes the coordinator on 127.0.0.1:9090 so you can
-# call the storage tier directly with curl or the storage smoke test.
+# Development-only override: publishes the coordinator on 127.0.0.1:9090 (call the
+# storage tier directly with curl or the storage tests) and the RabbitMQ management UI
+# on 127.0.0.1:15672.
 #
 #   make up-dev            (= docker compose -f docker-compose.yml -f docker-compose.dev.yml up)
 #
@@ -10,3 +11,7 @@ services:
   coordinator:
     ports:
       - "127.0.0.1:9090:8080"
+  rabbitmq:
+    # Management UI and HTTP API (queues, messages) for debugging and the demo.
+    ports:
+      - "127.0.0.1:15672:15672"
