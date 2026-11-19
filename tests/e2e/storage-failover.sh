@@ -37,7 +37,21 @@ CELLS=(tdr1yz tdr1yy tdr1zn tdr1yv tdr1yw u4pruy te7udq ttnfv2 tsq4e7 tdr4bq)
 RUN="$(date +%s)"
 
 BODY_FILE="$(mktemp)"
-trap 'rm -f "$BODY_FILE"' EXIT
+
+# On exit (also after a failure), delete every record this script created: they are raw
+# test records under real request/resource keys and would otherwise show up in the
+# services' listings. Deleted records become tombstones, which queries never return.
+# Best effort: a node may still be down after a failure, so errors are ignored.
+cleanup() {
+  local key
+  declare -p EXPECT >/dev/null 2>&1 || { rm -f -- "$BODY_FILE"; return; } # failed before any write
+  for key in "${!EXPECT[@]}"; do
+    [[ ${EXPECT[$key]} == DELETED ]] && continue
+    curl -s -o /dev/null -X DELETE "${BASE_URL}/v1/data/${key}" || true
+  done
+  rm -f -- "$BODY_FILE"
+}
+trap cleanup EXIT
 
 STATUS=""
 call() { # call METHOD PATH [JSON] — sets $STATUS, body in $BODY_FILE
@@ -253,6 +267,20 @@ start_node "$survivor"
 wait_for 90 "${survivor} resynchronised and ACTIVE" state_is "$survivor" ACTIVE
 wait_for 10 "shard ${SHARD} copies identical again" copies_identical "$SHARD"
 show_topology
+
+step "Cleanup: delete the test records"
+removed=0
+for key in "${!EXPECT[@]}"; do
+  [[ ${EXPECT[$key]} == DELETED ]] && continue
+  call DELETE "/v1/data/${key}"
+  [[ "$STATUS" == 204 ]] || fail "delete test record $key: HTTP $STATUS"
+  EXPECT[$key]=DELETED
+  removed=$(( removed + 1 ))
+done
+for s in 0 1 2; do
+  wait_for 10 "shard $s copies identical after the deletes" copies_identical "$s"
+done
+ok "$removed test records removed (tombstones replicated to every replica)"
 
 echo
 echo "PASS: storage failover test"

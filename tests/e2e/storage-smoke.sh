@@ -18,7 +18,18 @@ MISSING="resource:${CELL}:does-not-exist-${RANDOM}"
 REQUEST_KEY="request:smoke-$(date +%s)-${RANDOM}"
 
 BODY_FILE="$(mktemp)"
-trap 'rm -f "$BODY_FILE"' EXIT
+
+# Delete the records this script created, whether it passes or fails, so its raw test
+# records never show up as "resources" or "requests" in the services' listings. A deleted
+# record becomes a tombstone, which queries never return. Best effort: errors ignored.
+cleanup() {
+  local k
+  for k in "$KEY" "$REQUEST_KEY"; do
+    curl -s -o /dev/null -X DELETE "${BASE_URL}/v1/data/${k}" || true
+  done
+  rm -f -- "$BODY_FILE"
+}
+trap cleanup EXIT
 
 STATUS=""
 # call METHOD PATH [JSON] — sets $STATUS; the response body is in $BODY_FILE.
@@ -118,5 +129,9 @@ call PUT "/v1/data/resource:${CELL}:abc" '{"value":{},"indexes":{"collection":"r
 expect 400 "resource indexed under a different cell than its key"
 call PUT "/v1/data/request:abc" '{"value":{},"indexes":{"collection":"resource"}}'
 expect 400 "indexes.collection must match the key"
+
+echo "Cleanup"
+call DELETE "/v1/data/${REQUEST_KEY}"
+expect 204 "test request removed (its resource was deleted above)"
 
 echo "PASS: storage smoke test"
