@@ -30,7 +30,8 @@
   <modules>
     <module>common</module>
     <module>services/request_service</module>
-    <!-- services/resource_service and services/matching_service are added by their own branches -->
+    <module>services/resource_service</module>
+    <!-- services/matching_service is added by its own branch -->
   </modules>
 
   <properties>
