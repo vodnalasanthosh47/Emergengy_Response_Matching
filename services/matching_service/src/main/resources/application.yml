@@ -1,0 +1,47 @@
+# All settings come from environment variables (spec §6) with local defaults.
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+spring:
+  application:
+    name: matching-service
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USER:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+    connection-timeout: 3s
+    listener:
+      simple:
+        # spec §4.5: manual ack, prefetch 10. A message is acknowledged only after its
+        # request reached MATCHED or UNMATCHED (or needed nothing); failures go to the DLQ.
+        acknowledge-mode: manual
+        prefetch: 10
+        default-requeue-rejected: false
+
+emergency:
+  coordinator-url: ${COORDINATOR_URL:http://localhost:9090}
+  storage-timeout: ${STORAGE_TIMEOUT:10s}
+  candidate-limit: ${CANDIDATE_LIMIT:100}
+  event-attempts: ${EVENT_ATTEMPTS:3}
+  event-retry-delay: ${EVENT_RETRY_DELAY:1s}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,rabbit,storage
+  metrics:
+    tags:
+      application: matching-service
