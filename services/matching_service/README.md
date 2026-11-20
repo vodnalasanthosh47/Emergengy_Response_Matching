@@ -44,7 +44,11 @@ POST /match/{id} ─────────────────────
 6. **Mark the request `MATCHED`** with `assignedResourceId`, again conditionally. If the
    request changed meanwhile and is no longer matchable (cancelled, or matched by another
    attempt), **release** the claim: add the amount back (never above `total`),
-   `DEPLETED → AVAILABLE`, `OFFLINE` stays `OFFLINE`.
+   `DEPLETED → AVAILABLE`, `OFFLINE` stays `OFFLINE`. If the MATCHED write fails with
+   `503` or a timeout, its outcome is unknown (the coordinator may have applied it), so
+   the request is re-read first: already assigned to this resource → keep the claim;
+   still matchable → write MATCHED again; cancelled → release. Never confirmed → keep
+   the claim and report the error (unused capacity is fixable, double booking is not).
 7. **Nothing could be claimed:** the request becomes `UNMATCHED` (no write if it already is).
 
 **Why there is no double booking:** capacity only ever changes through a conditional
@@ -123,7 +127,7 @@ Health: `/actuator/health/readiness` needs RabbitMQ and the coordinator;
 |---|---|---|
 | `DemandTest` | 9 | amount per type, medicine name, corrupt details rejected |
 | `CandidateRankingTest` | 6 | nearest fitting first, exact fit, tie-breaks, type/status filter, medicine names |
-| `MatchingServiceTest` | 18 | happy path; deplete at 0; decimals exact; UNMATCHED; re-match later; every non-matchable status untouched; same request twice; claim conflict retried / skipped / capped; cancelled mid-match → released; storage failure after the claim → released |
+| `MatchingServiceTest` | 25 | happy path; deplete at 0; decimals exact; UNMATCHED; re-match later; every non-matchable status untouched; same request twice; claim conflict retried / skipped / capped; cancelled mid-match → released; MATCHED write with an unknown outcome (storage 503 / timeout): applied → claim kept, not applied → written again, cancelled → released, never confirmed → claim kept and reported |
 | `MatchingConcurrencyTest` | 120 | real threads, repeated: 2 requests for 1 resource → one MATCHED; 10 requests for 3 places → exactly 3; the same request twice at once → one claim |
 | `StorageStoresTest` | 5 | exact keys, bodies, indexes, `expectedVersion`; error mapping |
 | `MatchControllerTest` | 6 | every outcome and exception → status and error JSON |
@@ -154,7 +158,7 @@ claim), `POST /match` 422 → 200 → 409, 404, 400, and an empty DLQ. Checked b
 | # | Item | Notes |
 |---|---|---|
 | 1 | Push `feat/matching-service`, then merge everything into `main` | Branch is local only |
-| 2 | Crash between "claim" and "mark MATCHED" loses that capacity | Documented gap (spec §5). A storage *error* there already releases the claim; a process crash cannot. Fix: outbox / reconciliation job |
+| 2 | Crash between "claim" and "mark MATCHED" loses that capacity | Documented gap (spec §5). A definite storage error there (409 then failed re-read, 400) releases the claim. A 503 or timeout has an unknown outcome (the write may have landed): the request is re-read and the MATCHED write retried, and if storage never confirms either way the claim is **kept** and logged, because giving it back could double-book. A process crash cannot release. Fix: outbox / reconciliation job |
 | 3 | UNMATCHED requests are not re-matched automatically when a resource is registered | CP2+ (spec §7.2); use `POST /match/{id}` meanwhile |
 | 4 | Cancelling or fulfilling a MATCHED request does not give capacity back | Out of scope for CP1 (spec §7.2) |
 | 5 | Dead-lettered events are not replayed automatically | Inspect `matching.request-created.dlq` in the RabbitMQ UI; re-match with `POST /match/{id}` |

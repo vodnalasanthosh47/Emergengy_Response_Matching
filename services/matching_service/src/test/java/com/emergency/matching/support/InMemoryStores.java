@@ -32,7 +32,19 @@ public final class InMemoryStores {
         public final AtomicInteger updates = new AtomicInteger();
         /** Runs just before an update is checked, e.g. to simulate a concurrent writer. */
         public volatile Consumer<String> beforeUpdate = id -> { };
+        /** Runs after an update was applied, before its answer is returned (or lost). */
+        public volatile Consumer<String> afterUpdate = id -> { };
+        /** Every update fails with "storage unavailable" without being applied. */
         public volatile boolean updatesFail;
+        /** The next N updates fail with "storage unavailable" without being applied. */
+        public final AtomicInteger unappliedFailures = new AtomicInteger();
+        /**
+         * The next N updates are applied, but the caller gets "storage unavailable" instead of
+         * the answer (e.g. the primary was replaced mid-write, or the answer timed out).
+         */
+        public final AtomicInteger lostAnswers = new AtomicInteger();
+        /** Reads fail with "storage unavailable". */
+        public volatile boolean findsFail;
 
         public void put(RequestDocument doc) {
             records.put(doc.requestId(), new Versioned<>(doc, 1));
@@ -42,27 +54,39 @@ public final class InMemoryStores {
             return records.get(id).document();
         }
 
+        public long version(String id) {
+            return records.get(id).version();
+        }
+
         @Override
         public Optional<Versioned<RequestDocument>> find(String requestId) {
+            if (findsFail) {
+                throw new DependencyUnavailableException("storage down");
+            }
             return Optional.ofNullable(records.get(requestId));
         }
 
         @Override
         public Versioned<RequestDocument> update(RequestDocument request, long expectedVersion) {
             beforeUpdate.accept(request.requestId());
-            if (updatesFail) {
+            if (updatesFail || unappliedFailures.getAndUpdate(n -> Math.max(0, n - 1)) > 0) {
                 throw new DependencyUnavailableException("storage down");
             }
+            Versioned<RequestDocument> next;
             synchronized (this) {
                 Versioned<RequestDocument> current = records.get(request.requestId());
                 if (current == null || current.version() != expectedVersion) {
                     throw new ConcurrentUpdateException("request changed");
                 }
                 updates.incrementAndGet();
-                Versioned<RequestDocument> next = new Versioned<>(request, expectedVersion + 1);
+                next = new Versioned<>(request, expectedVersion + 1);
                 records.put(request.requestId(), next);
-                return next;
             }
+            afterUpdate.accept(request.requestId());
+            if (lostAnswers.getAndUpdate(n -> Math.max(0, n - 1)) > 0) {
+                throw new DependencyUnavailableException("primary replaced during the write; outcome unknown");
+            }
+            return next;
         }
 
         /** Another writer (a client, another matcher) changes the request behind our back. */

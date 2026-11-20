@@ -225,14 +225,123 @@ class MatchingServiceTest {
         assertThat(remaining(r)).isEqualByComparingTo("480");
     }
 
+    // ---- MATCHED writes with an unknown outcome (storage 503 / timeout) ----------------
+    // The coordinator may have applied such a write. Giving the capacity back while the
+    // request is MATCHED to the resource would let another request claim it: double booking.
+
+    /** The bug this guards against: the write landed, only the answer was lost. */
     @Test
-    void storageFailingAfterTheClaimGivesTheCapacityBackAndReportsIt() {
+    void appliedButUnconfirmedMatchKeepsTheClaim() {
+        RequestDocument req = water(20);
+        ResourceDocument r = waterResource(0.001, "500");
+        requests.lostAnswers.set(1);
+
+        MatchOutcome.Matched m = (MatchOutcome.Matched) service.match(req.requestId());
+
+        assertThat(m.resource().resourceId()).isEqualTo(r.resourceId());
+        assertThat(requests.get(req.requestId()).status()).isEqualTo(RequestStatus.MATCHED);
+        assertThat(requests.get(req.requestId()).assignedResourceId()).isEqualTo(r.resourceId());
+        assertThat(remaining(r)).as("claim kept, not given back").isEqualByComparingTo("480");
+        assertThat(requests.updates.get()).as("no second MATCHED write").isEqualTo(1);
+    }
+
+    @Test
+    void unappliedAndUnconfirmedMatchIsWrittenAgain() {
+        RequestDocument req = water(20);
+        ResourceDocument r = waterResource(0.001, "500");
+        requests.unappliedFailures.set(1);
+
+        assertThat(service.match(req.requestId())).isInstanceOf(MatchOutcome.Matched.class);
+
+        assertThat(requests.get(req.requestId()).assignedResourceId()).isEqualTo(r.resourceId());
+        assertThat(requests.version(req.requestId())).isEqualTo(2);
+        assertThat(remaining(r)).as("claimed once").isEqualByComparingTo("480");
+    }
+
+    @Test
+    void appliedButUnconfirmedMatchAlreadyInProgressKeepsTheClaim() {
+        RequestDocument req = water(20);
+        ResourceDocument r = waterResource(0.001, "500");
+        requests.lostAnswers.set(1);
+        requests.afterUpdate = id -> {
+            requests.afterUpdate = x -> { };
+            requests.concurrentWrite(requests.get(id).withStatus(RequestStatus.IN_PROGRESS, NOW)); // the client moves on
+        };
+
+        assertThat(service.match(req.requestId())).isInstanceOf(MatchOutcome.Matched.class);
+
+        assertThat(requests.get(req.requestId()).status()).isEqualTo(RequestStatus.IN_PROGRESS);
+        assertThat(remaining(r)).as("the resource is in use: claim kept").isEqualByComparingTo("480");
+    }
+
+    @Test
+    void appliedButUnconfirmedMatchThenCancelledGivesTheCapacityBack() {
+        RequestDocument req = water(20);
+        ResourceDocument r = waterResource(0.001, "500");
+        requests.lostAnswers.set(1);
+        requests.afterUpdate = id -> {
+            requests.afterUpdate = x -> { };
+            requests.concurrentWrite(requests.get(id).withStatus(RequestStatus.CANCELLED, NOW));
+        };
+
+        assertThat(service.match(req.requestId())).isInstanceOf(MatchOutcome.NotMatchable.class);
+        assertThat(remaining(r)).as("cancelled: nothing uses the resource").isEqualByComparingTo("500");
+    }
+
+    @Test
+    void unappliedAndUnconfirmedMatchOnACancelledRequestGivesTheCapacityBack() {
+        RequestDocument req = water(20);
+        ResourceDocument r = waterResource(0.001, "500");
+        requests.unappliedFailures.set(1);
+        requests.beforeUpdate = id -> {
+            requests.beforeUpdate = x -> { };
+            requests.concurrentWrite(requests.get(id).withStatus(RequestStatus.CANCELLED, NOW));
+        };
+
+        assertThat(service.match(req.requestId())).isInstanceOf(MatchOutcome.NotMatchable.class);
+        assertThat(remaining(r)).isEqualByComparingTo("500");
+    }
+
+    @Test
+    void storageNeverConfirmingTheMatchKeepsTheClaimAndReportsIt() {
         RequestDocument req = water(20);
         ResourceDocument r = waterResource(0.001, "500");
         requests.updatesFail = true;
+
         assertThatThrownBy(() -> service.match(req.requestId())).isInstanceOf(DependencyUnavailableException.class);
-        assertThat(remaining(r)).isEqualByComparingTo("500");
+
         assertThat(requests.get(req.requestId()).status()).isEqualTo(RequestStatus.PENDING);
+        // Unknown to the end: giving the capacity back could double-book, so it stays claimed
+        // (unused until fixed by hand), and the error is reported.
+        assertThat(remaining(r)).isEqualByComparingTo("480");
+    }
+
+    @Test
+    void unconfirmedMatchThatCannotBeReReadKeepsTheClaim() {
+        RequestDocument req = water(20);
+        ResourceDocument r = waterResource(0.001, "500");
+        requests.lostAnswers.set(1);
+        requests.afterUpdate = id -> requests.findsFail = true;
+
+        assertThatThrownBy(() -> service.match(req.requestId())).isInstanceOf(DependencyUnavailableException.class);
+        assertThat(requests.get(req.requestId()).assignedResourceId()).isEqualTo(r.resourceId());
+        assertThat(remaining(r)).isEqualByComparingTo("480");
+    }
+
+    /** A definite answer (409) followed by a failed re-read still gives the capacity back. */
+    @Test
+    void conflictThatCannotBeReReadGivesTheCapacityBack() {
+        RequestDocument req = water(20);
+        ResourceDocument r = waterResource(0.001, "500");
+        requests.beforeUpdate = id -> {
+            requests.beforeUpdate = x -> { };
+            requests.concurrentWrite(requests.get(id)); // our write will get 409
+            requests.findsFail = true;
+        };
+
+        assertThatThrownBy(() -> service.match(req.requestId())).isInstanceOf(DependencyUnavailableException.class);
+        assertThat(requests.get(req.requestId()).status()).isEqualTo(RequestStatus.PENDING);
+        assertThat(remaining(r)).isEqualByComparingTo("500");
     }
 
     @Test
