@@ -1,0 +1,18 @@
+# Settings shared by the three Java services (spec §6: all configuration from env vars).
+# The RabbitMQ user and password are not here: they are in the Secret
+# `rabbitmq-credentials`, created by `make k8s-secrets` (never committed).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: services-config
+  namespace: emergency
+  labels: { app.kubernetes.io/part-of: emergency }
+data:
+  SERVER_PORT: "8080"
+  # Kubernetes DNS names of the Services in this namespace.
+  COORDINATOR_URL: http://coordinator:8080
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_PORT: "5672"
+  # Must be the same in the Request and Resource Services, or matching compares
+  # cells of different sizes.
+  GEOHASH_PRECISION: "6"

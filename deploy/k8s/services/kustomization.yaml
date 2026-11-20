@@ -1,0 +1,11 @@
+# RabbitMQ and the three Java services. Needs the namespace and the Secret
+# rabbitmq-credentials (`make k8s-secrets`); applied together with the storage tier and
+# the gateway by deploy/k8s/kustomization.yaml.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - config.yaml
+  - rabbitmq.yaml
+  - request-service.yaml
+  - resource-service.yaml
+  - matching-service.yaml

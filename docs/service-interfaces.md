@@ -200,6 +200,7 @@ Newest first. Anything that changes an interface above gets a line.
 
 | Date | Who | Change | Affects |
 |---|---|---|---|
+| 2026-11-19 | Kubernetes branch | Services run on Kubernetes (`deploy/k8s/`): 2 pods each, settings from ConfigMap `services-config`, RabbitMQ credentials from Secret `rabbitmq-credentials`; Kubernetes uses `/actuator/health/liveness` and `/readiness`, so keep them. The gateway there is Envoy Gateway (Gateway API) with the same paths; a new service needs an HTTPRoute in `deploy/k8s/gateway/routes.yaml` as well as an nginx location | everyone |
 | 2026-11-19 | Matching branch | Matching Service added: `POST /match/{id}`, queue `matching.request-created` + DLQ, `/match` gateway route; `common`: `RequestDocument.matchedTo`, `ResourceDocument.withCapacity` | everyone |
 | 2026-11-19 | Matching branch | With matching running, new requests are matched (or UNMATCHED) within about a second: tests must not assume a request stays PENDING (`request-smoke` asks for an unmatchable amount) | everyone writing e2e tests |
 | 2026-11-19 | Matching branch | `make up` reloads the gateway's nginx config (a running gateway did not see new routes); `make smoke` runs all service smoke tests | everyone |

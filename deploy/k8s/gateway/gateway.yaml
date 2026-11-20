@@ -1,0 +1,57 @@
+# The single entry point for clients (spec §2.2-3: Gateway API, not ingress-nginx).
+#
+# Gateway API splits the job in three:
+#   GatewayClass  which controller implements gateways   (here Envoy Gateway, installed
+#                 cluster-wide by `make k8s-gateway-install`)
+#   Gateway       one entry point: listen on port 80      (Envoy Gateway runs an Envoy
+#                 proxy pod and a Service for it in namespace envoy-gateway-system)
+#   HTTPRoute     path → Kubernetes Service               (routes.yaml)
+#
+# The routes point at the Services, and Envoy load-balances over their ready pods, so
+# scaling a Deployment up or down needs no gateway change.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: emergency
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef: # how Envoy Gateway should run our proxy (below)
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: gateway-proxy
+    namespace: emergency
+---
+# Envoy Gateway settings for the proxy pod. Its Service is ClusterIP: on Minikube we
+# reach it with `make k8s-forward` (a LoadBalancer Service would only work with
+# `minikube tunnel`, which needs sudo).
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: gateway-proxy
+  namespace: emergency
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        type: ClusterIP
+      envoyDeployment:
+        replicas: 1
+        container:
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: gateway
+  namespace: emergency
+spec:
+  gatewayClassName: emergency
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces: { from: Same } # only routes in namespace emergency

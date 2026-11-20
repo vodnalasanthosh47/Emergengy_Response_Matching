@@ -1,0 +1,13 @@
+# Everything in namespace `emergency`: kubectl apply -k deploy/k8s  (or `make k8s-up`).
+#   storage/   coordinator + 3 shards × 2 storage nodes (StatefulSets with MongoDB)
+#   services/  RabbitMQ + Request, Resource and Matching Services (2 pods each)
+#   gateway/   Gateway API: the single entry point and its routes
+# The namespace is listed here, not in a part, so `make k8s-down` can delete the parts
+# and keep the namespace with its volumes (the data).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - storage
+  - services
+  - gateway

@@ -1,0 +1,82 @@
+# Path-based routing (spec §2.1), the same as deploy/compose/nginx.conf:
+#     /requests  → request-service      /resources → resource-service
+#     /match     → matching-service     /healthz   → answered by the gateway itself
+# PathPrefix matches whole path segments: /requests and /requests/{id}, not /requestsXYZ.
+# Anything else gets a 404, turned into the standard error JSON by traffic.yaml.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: requests
+  namespace: emergency
+spec:
+  parentRefs: [{ name: gateway }]
+  rules:
+    - matches: [{ path: { type: PathPrefix, value: /requests } }]
+      backendRefs: [{ name: request-service, port: 8080 }]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: resources
+  namespace: emergency
+spec:
+  parentRefs: [{ name: gateway }]
+  rules:
+    - matches: [{ path: { type: PathPrefix, value: /resources } }]
+      backendRefs: [{ name: resource-service, port: 8080 }]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: match
+  namespace: emergency
+spec:
+  parentRefs: [{ name: gateway }]
+  rules:
+    - matches: [{ path: { type: PathPrefix, value: /match } }]
+      backendRefs: [{ name: matching-service, port: 8080 }]
+---
+# Answered by Envoy without calling a service: /healthz says the gateway is up, and any
+# other path is a 404. Gateway API has no "direct response" of its own, so this uses
+# Envoy Gateway's HTTPRouteFilter extension.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: gateway-local
+  namespace: emergency
+spec:
+  parentRefs: [{ name: gateway }]
+  rules:
+    - matches: [{ path: { type: Exact, value: /healthz } }]
+      filters:
+        - type: ExtensionRef
+          extensionRef: { group: gateway.envoyproxy.io, kind: HTTPRouteFilter, name: healthz }
+    # The longest matching prefix wins, so "/" only catches paths no other route has.
+    - matches: [{ path: { type: PathPrefix, value: / } }]
+      filters:
+        - type: ExtensionRef
+          extensionRef: { group: gateway.envoyproxy.io, kind: HTTPRouteFilter, name: not-found }
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: HTTPRouteFilter
+metadata:
+  name: healthz
+  namespace: emergency
+spec:
+  directResponse:
+    statusCode: 200
+    contentType: application/json
+    body: { type: Inline, inline: '{"status":"ok"}' }
+---
+# Plain text on purpose: traffic.yaml rewrites the gateway's own text/plain errors into
+# the standard error JSON (with a timestamp, which a fixed body could not have).
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: HTTPRouteFilter
+metadata:
+  name: not-found
+  namespace: emergency
+spec:
+  directResponse:
+    statusCode: 404
+    contentType: text/plain
+    body: { type: Inline, inline: "no such endpoint" }
