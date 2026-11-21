@@ -172,6 +172,10 @@ services:
       RABBITMQ_PORT: "5672"
       RABBITMQ_USER: ${RABBITMQ_USER:-emergency}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-emergency}
+      # Rematch sweeper: how often waiting requests (UNMATCHED, or PENDING for over
+      # REMATCH_PENDING_AGE) are put back on the matching queue. Override in .env.
+      REMATCH_INTERVAL: ${REMATCH_INTERVAL:-2m}
+      REMATCH_PENDING_AGE: ${REMATCH_PENDING_AGE:-2m}
     networks: [services]
     mem_limit: 512m
     restart: unless-stopped
