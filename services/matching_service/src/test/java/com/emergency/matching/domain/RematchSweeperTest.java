@@ -50,8 +50,12 @@ class RematchSweeperTest {
         published.add(new Published(id, type, reason));
     };
 
+    private boolean leaseHeldElsewhere;
+    private final SweepLease lease = ttl -> !leaseHeldElsewhere;
+
     private RematchSweeper sweeper(int batchSize) {
-        return new RematchSweeper(waiting, publisher, Clock.fixed(NOW, ZoneOffset.UTC), PENDING_AGE, batchSize);
+        return new RematchSweeper(waiting, publisher, lease, Duration.ofMinutes(3), Clock.fixed(NOW, ZoneOffset.UTC),
+                PENDING_AGE, batchSize);
     }
 
     /** A stored request whose createdAt and updatedAt are {@code age} before now. */
@@ -72,7 +76,7 @@ class RematchSweeperTest {
 
         RematchSweeper.Result result = sweeper(500).sweep();
 
-        assertThat(result).isEqualTo(new RematchSweeper.Result(1, 1, 2));
+        assertThat(result).isEqualTo(new RematchSweeper.Result(true, 1, 1, 2));
         assertThat(published).containsExactlyInAnyOrder(
                 new Published(unmatched.requestId(), Category.WATER, Reason.UNMATCHED),
                 new Published(stale.requestId(), Category.WATER, Reason.STALE_PENDING));
@@ -121,16 +125,29 @@ class RematchSweeperTest {
     @Test
     void nothingWaitingPublishesNothing() {
         stored(RequestStatus.MATCHED, Duration.ofHours(1)); // never asked for
-        assertThat(sweeper(500).sweep()).isEqualTo(new RematchSweeper.Result(0, 0, 0));
+        assertThat(sweeper(500).sweep()).isEqualTo(new RematchSweeper.Result(true, 0, 0, 0));
+        assertThat(published).isEmpty();
+    }
+
+    @Test
+    void anotherInstanceHoldingTheLeaseMeansNoWork() {
+        stored(RequestStatus.UNMATCHED, Duration.ofHours(1));
+        leaseHeldElsewhere = true;
+        storageDown = true; // proves storage is not even read
+
+        assertThat(sweeper(500).sweep()).isEqualTo(new RematchSweeper.Result(false, 0, 0, 0));
         assertThat(published).isEmpty();
     }
 
     @Test
     void rejectsNonsenseSettings() {
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
-        assertThatThrownBy(() -> new RematchSweeper(waiting, publisher, clock, PENDING_AGE, 0))
+        Duration ttl = Duration.ofMinutes(3);
+        assertThatThrownBy(() -> new RematchSweeper(waiting, publisher, lease, ttl, clock, PENDING_AGE, 0))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> new RematchSweeper(waiting, publisher, clock, Duration.ofSeconds(-1), 10))
+        assertThatThrownBy(() -> new RematchSweeper(waiting, publisher, lease, ttl, clock, Duration.ofSeconds(-1), 10))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new RematchSweeper(waiting, publisher, lease, Duration.ZERO, clock, PENDING_AGE, 10))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 }

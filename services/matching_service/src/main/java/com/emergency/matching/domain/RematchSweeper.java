@@ -34,6 +34,9 @@ import com.emergency.common.request.RequestStatus;
  *
  * <p>Oldest requests go first, at most {@code batchSize} per pass, so a backlog cannot
  * flood the queue in one burst; the rest are picked up by the next passes.
+ *
+ * <p>With several matching pods, only the holder of the {@link SweepLease} sweeps; the
+ * others skip the pass.
  */
 public class RematchSweeper {
 
@@ -44,24 +47,40 @@ public class RematchSweeper {
 
     private final WaitingRequests waiting;
     private final RematchPublisher publisher;
+    private final SweepLease lease;
+    private final Duration leaseTtl;
     private final Clock clock;
     private final Duration pendingAge;
     private final int batchSize;
 
-    public RematchSweeper(WaitingRequests waiting, RematchPublisher publisher, Clock clock, Duration pendingAge,
-            int batchSize) {
-        if (pendingAge.isNegative() || batchSize < 1) {
-            throw new IllegalArgumentException("pendingAge must be >= 0 and batchSize >= 1");
+    /**
+     * @param leaseTtl how long a pass holds the lease; longer than the interval between
+     *                 passes, so the holder renews it before it expires and keeps it
+     */
+    public RematchSweeper(WaitingRequests waiting, RematchPublisher publisher, SweepLease lease, Duration leaseTtl,
+            Clock clock, Duration pendingAge, int batchSize) {
+        if (pendingAge.isNegative() || batchSize < 1 || !leaseTtl.isPositive()) {
+            throw new IllegalArgumentException("pendingAge must be >= 0, batchSize >= 1 and leaseTtl > 0");
         }
         this.waiting = waiting;
         this.publisher = publisher;
+        this.lease = lease;
+        this.leaseTtl = leaseTtl;
         this.clock = clock;
         this.pendingAge = pendingAge;
         this.batchSize = batchSize;
     }
 
-    /** What one pass found and how many requests it re-queued. */
-    public record Result(int unmatched, int stalePending, int published) {
+    /**
+     * What one pass found and how many requests it re-queued.
+     *
+     * @param ran false if another instance holds the lease (nothing was done)
+     */
+    public record Result(boolean ran, int unmatched, int stalePending, int published) {
+
+        static Result skipped() {
+            return new Result(false, 0, 0, 0);
+        }
     }
 
     private record Due(RequestDocument request, Reason reason) {
@@ -74,6 +93,10 @@ public class RematchSweeper {
      *         published; the next pass tries again)
      */
     public Result sweep() {
+        if (!lease.tryAcquire(leaseTtl)) {
+            log.debug("rematch: another instance holds the sweep lease; skipping this pass");
+            return Result.skipped();
+        }
         Instant cutoff = clock.instant().minus(pendingAge);
         List<RequestDocument> unmatched = waiting.withStatus(RequestStatus.UNMATCHED, FETCH_LIMIT);
         List<RequestDocument> stalePending = waiting.withStatus(RequestStatus.PENDING, FETCH_LIMIT).stream()
@@ -105,6 +128,6 @@ public class RematchSweeper {
             log.info("rematch: re-queued {} of {} waiting requests ({} UNMATCHED, {} PENDING for over {})", published,
                     unmatched.size() + stalePending.size(), unmatched.size(), stalePending.size(), pendingAge);
         }
-        return new Result(unmatched.size(), stalePending.size(), published);
+        return new Result(true, unmatched.size(), stalePending.size(), published);
     }
 }
