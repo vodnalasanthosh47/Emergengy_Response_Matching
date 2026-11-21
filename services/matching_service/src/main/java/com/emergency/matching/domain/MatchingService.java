@@ -126,38 +126,109 @@ public class MatchingService {
         return Optional.empty();
     }
 
-    /** Marks the request MATCHED to the claimed resource; gives the capacity back if it can't. */
+    /**
+     * Marks the request MATCHED to the claimed resource; gives the capacity back if it can't.
+     *
+     * <p>A MATCHED write that fails with "storage unavailable" (a 503 or a timeout) has an
+     * <em>unknown</em> outcome: the coordinator may have applied it, for example when the
+     * shard's primary was replaced mid-write, or when our timeout fired after the write
+     * landed (coordinator contract: "re-read and retry"). Giving the capacity back then could
+     * leave the request MATCHED to a resource whose capacity another request can claim again:
+     * double booking. So after such a failure the request is re-read:
+     * <ul>
+     * <li>assigned to our resource: our write was applied, keep the claim;</li>
+     * <li>still matchable: our write was not applied (yet), so write MATCHED again on the
+     *     version just read. Only one of the two writes can succeed on that version;</li>
+     * <li>cancelled or gone: give the capacity back, as for any other change.</li>
+     * </ul>
+     * If the outcome is still unknown when we give up, the claim is kept and the error
+     * reported. That may leave capacity unused (fixable by hand), but never double-books
+     * a resource (spec §2.2-5: claiming favours consistency).
+     */
     private MatchOutcome assign(Versioned<RequestDocument> request, Claim claim, Demand demand) {
         String resourceId = claim.resource().document().resourceId();
         String requestId = request.document().requestId();
         Versioned<RequestDocument> current = request;
-        try {
-            for (int attempt = 1; attempt <= MAX_REQUEST_ATTEMPTS; attempt++) {
-                try {
-                    Versioned<RequestDocument> matched = requests.update(current.document().matchedTo(resourceId, now()),
-                            current.version());
-                    log.info("request {} MATCHED to {} ({} km)", matched.document().requestId(), resourceId,
-                            String.format(Locale.ROOT, "%.2f", claim.distanceKm()));
-                    return new MatchOutcome.Matched(view(matched), resourceView(claim.resource()), claim.distanceKm());
-                } catch (ConcurrentUpdateException e) {
-                    Optional<Versioned<RequestDocument>> fresh = requests.find(requestId);
-                    if (fresh.isEmpty() || !fresh.get().document().status().isMatchable()) {
-                        // Cancelled, or matched by a concurrent attempt: undo our claim.
-                        release(claim, demand);
-                        return fresh.<MatchOutcome>map(r -> new MatchOutcome.NotMatchable(view(r)))
-                                .orElseGet(() -> new MatchOutcome.NotFound(requestId));
-                    }
-                    current = fresh.get(); // changed but still matchable: try again on the new version
-                }
+        // True once any MATCHED write had an unknown outcome: from then on a request found
+        // assigned to our resource may carry our own write.
+        boolean anyUnknown = false;
+        // Whether the most recent write's outcome is unknown, i.e. it may still be applied.
+        boolean lastUnknown = false;
+        for (int attempt = 1; attempt <= MAX_REQUEST_ATTEMPTS; attempt++) {
+            try {
+                Versioned<RequestDocument> matched = requests.update(current.document().matchedTo(resourceId, now()),
+                        current.version());
+                log.info("request {} MATCHED to {} ({} km)", matched.document().requestId(), resourceId,
+                        String.format(Locale.ROOT, "%.2f", claim.distanceKm()));
+                return matched(matched, claim);
+            } catch (ConcurrentUpdateException e) {
+                lastUnknown = false; // definite answer: our write was not applied
+            } catch (DependencyUnavailableException e) {
+                anyUnknown = lastUnknown = true;
+                log.warn("request {}: MATCHED write to {} has an unknown outcome ({}); re-reading", requestId, resourceId,
+                        e.getMessage());
+            } catch (RuntimeException e) {
+                // Any other failure means the write was rejected, not applied.
+                giveBackUnlessUnknown(claim, demand, lastUnknown);
+                throw e;
             }
-        } catch (RuntimeException e) {
-            // Storage failed while updating the request: try to give the capacity back so it
-            // is not lost (if storage is down this fails too; that gap is documented, spec §5).
-            release(claim, demand);
-            throw e;
+
+            Optional<Versioned<RequestDocument>> fresh;
+            try {
+                fresh = requests.find(requestId);
+            } catch (RuntimeException e) {
+                giveBackUnlessUnknown(claim, demand, lastUnknown);
+                throw e;
+            }
+            if (fresh.isPresent() && anyUnknown && assignedTo(fresh.get().document(), resourceId)) {
+                log.info("request {} MATCHED to {}: the write with the unknown outcome was applied", requestId, resourceId);
+                return matched(fresh.get(), claim);
+            }
+            if (fresh.isEmpty() || !fresh.get().document().status().isMatchable()) {
+                // Cancelled, or matched by a concurrent attempt: undo our claim. A write of
+                // ours that is still in flight can no longer be applied, because it was
+                // conditional on a version the request has moved past.
+                release(claim, demand);
+                return fresh.<MatchOutcome>map(r -> new MatchOutcome.NotMatchable(view(r)))
+                        .orElseGet(() -> new MatchOutcome.NotFound(requestId));
+            }
+            current = fresh.get(); // still matchable: try again on the version just read
+        }
+        if (lastUnknown) {
+            giveBackUnlessUnknown(claim, demand, true);
+            throw new DependencyUnavailableException("request " + requestId + ": storage did not confirm the MATCHED write");
         }
         release(claim, demand);
         throw new ConcurrentUpdateException("request " + requestId + " is being changed concurrently");
+    }
+
+    /**
+     * Whether the request holds a match to {@code resourceId} that is still in use. A
+     * CANCELLED request no longer uses its resource, so its capacity may be given back.
+     * (Another attempt on the same request that claimed the same resource looks the same;
+     * then both claims are kept and one amount stays unused, but nothing is double-booked.)
+     */
+    private static boolean assignedTo(RequestDocument request, String resourceId) {
+        return resourceId.equals(request.assignedResourceId()) && request.status() != RequestStatus.CANCELLED;
+    }
+
+    /**
+     * Gives the claim back after a failed assignment, unless the last MATCHED write may
+     * still have been applied: then the claim is kept (capacity may stay unused until fixed
+     * by hand, but the resource is never double-booked).
+     */
+    private void giveBackUnlessUnknown(Claim claim, Demand demand, boolean outcomeUnknown) {
+        if (outcomeUnknown) {
+            log.error("keeping the claim of {} on {}: the request's MATCHED write may have been applied; "
+                    + "if the request is not MATCHED to it, give the capacity back by hand",
+                    demand.amount(), claim.resource().document().resourceId());
+            return;
+        }
+        release(claim, demand);
+    }
+
+    private MatchOutcome matched(Versioned<RequestDocument> request, Claim claim) {
+        return new MatchOutcome.Matched(view(request), resourceView(claim.resource()), claim.distanceKm());
     }
 
     /** Compensating write: adds the claimed amount back to the resource. Best effort. */
