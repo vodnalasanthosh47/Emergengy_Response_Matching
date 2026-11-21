@@ -28,11 +28,14 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.rabbitmq.RabbitMQContainer;
 
 import com.emergency.common.events.EventTopology;
+import com.emergency.common.events.RematchRequestedEvent;
 import com.emergency.common.events.RequestCreatedEvent;
 import com.emergency.common.model.Category;
 import com.emergency.common.request.RequestDocument;
+import com.emergency.common.request.RequestStatus;
 import com.emergency.common.request.RequestView;
 import com.emergency.common.resource.ResourceDocument;
+import com.emergency.common.resource.ResourceStatus;
 import com.emergency.common.storage.StorageKeys;
 import com.emergency.matching.support.FakeCoordinator;
 import com.emergency.matching.support.Fixtures;
@@ -121,6 +124,25 @@ class MatchingServiceApplicationTest {
                 new Message(json.writeValueAsBytes(event), p));
     }
 
+    /** Stores a request and a fitting resource near (lat, lng), away from the other tests' requests. */
+    private RequestDocument storeAt(double lat, double lng, Category type, String details, RequestStatus status) {
+        RequestDocument r = Fixtures.request(java.util.UUID.randomUUID().toString(), type, lat, lng, details, status);
+        COORDINATOR.put(StorageKeys.request(r.requestId()), r, java.util.Map.of(
+                "collection", "request", "type", type.name(), "status", status.name(), "geoCell", r.geoCell()));
+        return r;
+    }
+
+    private ResourceDocument storeResourceAt(double lat, double lng, Category type, String total) {
+        ResourceDocument r = Fixtures.resource(type, lat, lng, total, total, ResourceStatus.AVAILABLE, null);
+        COORDINATOR.put(StorageKeys.resourceIdToKey(r.resourceId()), r, java.util.Map.of(
+                "collection", "resource", "type", type.name(), "status", r.status().name(), "geoCell", r.geoCell()));
+        return r;
+    }
+
+    private String status(String requestId) {
+        return storedRequest(requestId).path("value").path("status").stringValue();
+    }
+
     private static void await(String what, BooleanSupplier condition) throws InterruptedException {
         long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
         while (!condition.getAsBoolean()) {
@@ -181,6 +203,26 @@ class MatchingServiceApplicationTest {
         publish(request);
         await("request UNMATCHED", () -> "UNMATCHED".equals(storedRequest(request.requestId()).path("value").path("status").stringValue()));
         assertThat(storedRequest(request.requestId()).path("indexes").path("status").stringValue()).isEqualTo("UNMATCHED");
+    }
+
+    /** The rematch sweeper's message goes to the same queue and gets a waiting request matched. */
+    @Test
+    void aRematchRequestedEventGetsAnUnmatchedRequestMatched() throws Exception {
+        RequestDocument request = storeAt(28.6139, 77.2090, Category.WATER, "{\"quantity\":20,\"unit\":\"L\"}",
+                RequestStatus.UNMATCHED);
+        ResourceDocument resource = storeResourceAt(28.6149, 77.2090, Category.WATER, "100"); // registered later
+
+        RematchRequestedEvent event = RematchRequestedEvent.of(request.requestId(), Category.WATER,
+                RematchRequestedEvent.Reason.UNMATCHED, Instant.now());
+        MessageProperties p = new MessageProperties();
+        p.setContentType(MessageProperties.CONTENT_TYPE_JSON);
+        rabbit.send(EventTopology.EXCHANGE, EventTopology.requestRematchRoutingKey(Category.WATER),
+                new Message(json.writeValueAsBytes(event), p));
+
+        await("request MATCHED", () -> "MATCHED".equals(status(request.requestId())));
+        assertThat(storedRequest(request.requestId()).path("value").path("assignedResourceId").stringValue())
+                .isEqualTo(resource.resourceId());
+        assertThat(storedResource(resource).path("value").path("capacity").path("remaining").intValue()).isEqualTo(80);
     }
 
     @Test
