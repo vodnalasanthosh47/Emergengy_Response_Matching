@@ -128,6 +128,8 @@ acting (the event may be stale); act only if `status.isMatchable()`; write `MATC
 Known gaps (documented, not solved in CP1):
 - A crash between storing and publishing leaves a PENDING request without an event
   (if publishing fails without a crash, the request is deleted again and the client gets 503).
+  The Matching Service's rematch sweeper re-queues such a request once it has been PENDING
+  for `REMATCH_PENDING_AGE` (2 min), so it is matched a few minutes late, not never.
 - If no queue is bound yet (Matching Service never started), events are not routed;
   the Request Service logs a warning. Start the Matching Service before creating requests,
   or use `POST /match/{id}` later.
@@ -156,7 +158,9 @@ on `409` re-read and check again.
 | Interface | Details |
 |---|---|
 | Public API | `POST /match/{requestId}`: 200 assignment, 422 `NO_MATCH`, 409 not matchable, 404, 400 (contracts/openapi/matching-service-api.yaml) |
-| Consumes | `RequestCreated` v1 from queue `matching.request-created` (bound `request.created.*`); dead letters to `matching.request-created.dlq` via `emergency.dlx` (fanout). Declared by this service on startup |
+| Consumes | `RequestCreated` v1 and `RematchRequested` v1 from queue `matching.request-created` (bound `request.created.*` and `request.rematch.*`); dead letters to `matching.request-created.dlq` via `emergency.dlx` (fanout). Declared by this service on startup |
+| Publishes | `RematchRequested` v1 (contracts/events/rematch-requested.v1.json), routing key `request.rematch.<type>`: every `REMATCH_INTERVAL` (2 min) the rematch sweeper re-queues UNMATCHED requests and PENDING ones unchanged for `REMATCH_PENDING_AGE` (2 min) |
+| Other storage | `lease:rematch-sweeper` (collection `lease`): which matching pod sweeps (docs/data-format.md §2) |
 | Writes requests | only `MATCHED` (+ `assignedResourceId`) and `UNMATCHED`, with `expectedVersion`, status index in sync (`RequestDocument.matchedTo`) |
 | Writes resources | claims and releases: `capacity.remaining` and `status` (`DEPLETED` at 0, back to `AVAILABLE` on release) together, with `expectedVersion` (`ResourceDocument.withCapacity`) |
 | Relies on | the request `details` amount fields and the resource `capacity.unit` table in §3; `RequestStatus.isMatchable`; resources' `geoCell` = key cell (geo-routed search) |
@@ -200,6 +204,7 @@ Newest first. Anything that changes an interface above gets a line.
 
 | Date | Who | Change | Affects |
 |---|---|---|---|
+| 2026-11-21 | Rematch branch | Matching Service re-queues waiting requests every `REMATCH_INTERVAL` (2 min): UNMATCHED, and PENDING unchanged for 2 min, as `RematchRequested` v1 (routing key `request.rematch.<type>`, same queue). New storage record `lease:rematch-sweeper`. A request's status may now change from UNMATCHED to MATCHED minutes later without anyone calling `/match`: tests must not assume an UNMATCHED request stays UNMATCHED once a fitting resource exists | everyone writing e2e tests |
 | 2026-11-19 | Kubernetes branch | Services run on Kubernetes (`deploy/k8s/`): 2 pods each, settings from ConfigMap `services-config`, RabbitMQ credentials from Secret `rabbitmq-credentials`; Kubernetes uses `/actuator/health/liveness` and `/readiness`, so keep them. The gateway there is Envoy Gateway (Gateway API) with the same paths; a new service needs an HTTPRoute in `deploy/k8s/gateway/routes.yaml` as well as an nginx location | everyone |
 | 2026-11-19 | Matching branch | Matching Service added: `POST /match/{id}`, queue `matching.request-created` + DLQ, `/match` gateway route; `common`: `RequestDocument.matchedTo`, `ResourceDocument.withCapacity` | everyone |
 | 2026-11-19 | Matching branch | With matching running, new requests are matched (or UNMATCHED) within about a second: tests must not assume a request stays PENDING (`request-smoke` asks for an unmatchable amount) | everyone writing e2e tests |
