@@ -29,6 +29,14 @@ emergency:
   candidate-limit: ${CANDIDATE_LIMIT:100}
   event-attempts: ${EVENT_ATTEMPTS:3}
   event-retry-delay: ${EVENT_RETRY_DELAY:1s}
+  # Rematch sweeper: every interval, re-queue the requests still waiting for a resource
+  # (UNMATCHED, and PENDING unchanged for pending-age) so a resource registered later
+  # is found without anyone calling POST /match.
+  rematch:
+    enabled: ${REMATCH_ENABLED:true}
+    interval: ${REMATCH_INTERVAL:2m}
+    pending-age: ${REMATCH_PENDING_AGE:2m}
+    batch-size: ${REMATCH_BATCH_SIZE:500}
 
 management:
   endpoints:

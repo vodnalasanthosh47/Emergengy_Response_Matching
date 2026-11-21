@@ -37,6 +37,7 @@ import com.emergency.common.request.RequestView;
 import com.emergency.common.resource.ResourceDocument;
 import com.emergency.common.resource.ResourceStatus;
 import com.emergency.common.storage.StorageKeys;
+import com.emergency.matching.domain.RematchSweeper;
 import com.emergency.matching.support.FakeCoordinator;
 import com.emergency.matching.support.Fixtures;
 
@@ -84,6 +85,9 @@ class MatchingServiceApplicationTest {
 
     @Autowired
     AmqpAdmin admin;
+
+    @Autowired
+    RematchSweeper sweeper;
 
     private final JsonMapper json = JsonMapper.builder().build();
 
@@ -223,6 +227,27 @@ class MatchingServiceApplicationTest {
         assertThat(storedRequest(request.requestId()).path("value").path("assignedResourceId").stringValue())
                 .isEqualTo(resource.resourceId());
         assertThat(storedResource(resource).path("value").path("capacity").path("remaining").intValue()).isEqualTo(80);
+    }
+
+    /** One pass of the real sweeper: storage query → RabbitMQ → listener → MATCHED. */
+    @Test
+    void theSweeperRequeuesAnUnmatchedRequestThatCanNowBeServed() throws Exception {
+        RequestDocument request = storeAt(19.0760, 72.8777, Category.FOOD, "{\"quantity\":10,\"unit\":\"MEALS\"}",
+                RequestStatus.UNMATCHED);
+        ResourceDocument resource = storeResourceAt(19.0770, 72.8777, Category.FOOD, "50"); // registered later
+
+        RematchSweeper.Result result = sweeper.sweep();
+
+        assertThat(result.published()).isGreaterThanOrEqualTo(1);
+        await("request MATCHED", () -> "MATCHED".equals(status(request.requestId())));
+        assertThat(storedRequest(request.requestId()).path("value").path("assignedResourceId").stringValue())
+                .isEqualTo(resource.resourceId());
+        assertThat(storedResource(resource).path("value").path("capacity").path("remaining").intValue()).isEqualTo(40);
+        // The pass also re-queued other tests' waiting requests: let them settle (all
+        // harmless, each is re-read and left alone or matched once).
+        await("queue drained", () -> queued(EventTopology.MATCHING_QUEUE) == 0);
+        Thread.sleep(500);
+        assertThat(queued(EventTopology.MATCHING_DEAD_LETTER_QUEUE)).isZero();
     }
 
     @Test
