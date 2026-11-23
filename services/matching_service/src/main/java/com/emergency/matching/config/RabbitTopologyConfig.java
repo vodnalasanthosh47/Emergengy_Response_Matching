@@ -18,6 +18,7 @@ import com.emergency.common.events.EventTopology;
  *
  * <pre>
  * emergency.events (topic) ──request.created.*──► matching.request-created ──► listener
+ *                          ──request.rematch.*──►      ▲ (from the rematch sweeper)
  *                                                      │ rejected (nack, no requeue)
  *                                                      ▼
  *                              emergency.dlx (fanout) ──► matching.request-created.dlq
@@ -55,6 +56,12 @@ public class RabbitTopologyConfig {
     @Bean
     Binding matchingBinding(Queue matchingQueue, TopicExchange eventsExchange) {
         return BindingBuilder.bind(matchingQueue).to(eventsExchange).with(EventTopology.REQUEST_CREATED_BINDING);
+    }
+
+    /** Requests the rematch sweeper re-queues go to the same queue and listener. */
+    @Bean
+    Binding rematchBinding(Queue matchingQueue, TopicExchange eventsExchange) {
+        return BindingBuilder.bind(matchingQueue).to(eventsExchange).with(EventTopology.REQUEST_REMATCH_BINDING);
     }
 
     @Bean

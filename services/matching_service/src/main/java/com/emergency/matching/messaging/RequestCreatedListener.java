@@ -9,6 +9,7 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 
 import com.emergency.common.events.EventTopology;
+import com.emergency.common.events.RematchRequestedEvent;
 import com.emergency.common.events.RequestCreatedEvent;
 import com.emergency.matching.domain.ConcurrentUpdateException;
 import com.emergency.matching.domain.DependencyUnavailableException;
@@ -20,8 +21,17 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
- * Consumes {@code RequestCreated} (contracts/events/request-created.v1.json) and runs the
- * matching algorithm. Acknowledgement is manual (spec §4.5):
+ * Consumes the matching queue and runs the matching algorithm for each message. Two
+ * message types arrive there:
+ *
+ * <ul>
+ * <li>{@code RequestCreated} (contracts/events/request-created.v1.json), from the Request
+ *     Service when a request is stored;</li>
+ * <li>{@code RematchRequested} (contracts/events/rematch-requested.v1.json), from this
+ *     service's rematch sweeper for a request that is still waiting.</li>
+ * </ul>
+ *
+ * Both are handled the same way. Acknowledgement is manual (spec §4.5):
  *
  * <ul>
  * <li><b>ack</b> once the attempt has a final outcome: MATCHED, UNMATCHED, not matchable
@@ -58,7 +68,7 @@ public class RequestCreatedListener {
         try {
             requestId = requestIdOf(message);
         } catch (RuntimeException e) {
-            log.error("malformed RequestCreated event (message-id {}), sent to the DLQ: {}",
+            log.error("malformed event (message-id {}), sent to the DLQ: {}",
                     message.getMessageProperties().getMessageId(), e.getMessage());
             channel.basicNack(tag, false, false);
             return;
@@ -67,32 +77,42 @@ public class RequestCreatedListener {
         for (int attempt = 1; attempt <= attempts; attempt++) {
             try {
                 MatchOutcome outcome = matching.match(requestId);
-                log.info("RequestCreated {} handled: {}", requestId, outcome.getClass().getSimpleName());
+                log.info("request {} handled: {}", requestId, outcome.getClass().getSimpleName());
                 channel.basicAck(tag, false);
                 return;
             } catch (DependencyUnavailableException | ConcurrentUpdateException e) {
-                log.warn("RequestCreated {}: attempt {}/{} failed: {}", requestId, attempt, attempts, e.getMessage());
+                log.warn("request {}: attempt {}/{} failed: {}", requestId, attempt, attempts, e.getMessage());
                 if (attempt < attempts && !pause()) {
                     break;
                 }
             } catch (RuntimeException e) {
-                log.error("RequestCreated {}: unexpected error", requestId, e);
+                log.error("request {}: unexpected error", requestId, e);
                 break;
             }
         }
-        log.error("RequestCreated {} sent to the DLQ ({}); match it later with POST /match/{}", requestId,
+        log.error("event for request {} sent to the DLQ ({}); match it later with POST /match/{}", requestId,
                 EventTopology.MATCHING_DEAD_LETTER_QUEUE, requestId);
         channel.basicNack(tag, false, false);
     }
 
-    /** The request ID of a v1 RequestCreated event; anything else is malformed. */
+    /**
+     * The request ID of a v1 RequestCreated or RematchRequested event; anything else is
+     * malformed. Only the ID is used: the request itself is re-read from storage.
+     */
     private String requestIdOf(Message message) {
         JsonNode event = json.readTree(message.getBody());
-        if (!RequestCreatedEvent.TYPE.equals(event.path("eventType").asString(null))
-                || event.path("schemaVersion").asInt(-1) != RequestCreatedEvent.SCHEMA_VERSION) {
-            throw new IllegalArgumentException("not a RequestCreated v" + RequestCreatedEvent.SCHEMA_VERSION + " event");
+        String type = event.path("eventType").asString(null);
+        int version = event.path("schemaVersion").asInt(-1);
+        JsonNode idNode;
+        if (RequestCreatedEvent.TYPE.equals(type) && version == RequestCreatedEvent.SCHEMA_VERSION) {
+            idNode = event.path("request").path("requestId");
+        } else if (RematchRequestedEvent.TYPE.equals(type) && version == RematchRequestedEvent.SCHEMA_VERSION) {
+            idNode = event.path("requestId");
+        } else {
+            throw new IllegalArgumentException("not a RequestCreated v" + RequestCreatedEvent.SCHEMA_VERSION
+                    + " or RematchRequested v" + RematchRequestedEvent.SCHEMA_VERSION + " event");
         }
-        String id = event.path("request").path("requestId").asString(null);
+        String id = idNode.asString(null);
         if (id == null || id.isBlank()) {
             throw new IllegalArgumentException("event has no request.requestId");
         }

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://emergency.local/contracts/events/rematch-requested.v1.json",
+  "title": "RematchRequested v1",
+  "description": "Published by the Matching Service's rematch sweeper, which periodically (REMATCH_INTERVAL, default 2 min) re-queues requests that are waiting for a resource: UNMATCHED requests (a resource may have appeared since) and requests still PENDING after REMATCH_PENDING_AGE (their RequestCreated event was lost, e.g. the Request Service crashed between storing and publishing). Exchange emergency.events (topic, durable), routing key request.rematch.<type in lower case>, persistent, content type application/json, AMQP message-id = eventId. It goes to the same queue as RequestCreated (matching.request-created, also bound with request.rematch.*), and the consumer treats it the same way: re-read the request, match it only if it is still PENDING or UNMATCHED. So a duplicate or stale message never claims twice. It carries only the request's ID and type, not the request: the consumer reads the current request from storage anyway.",
+  "type": "object",
+  "required": ["eventId", "eventType", "schemaVersion", "occurredAt", "requestId", "type", "reason"],
+  "additionalProperties": false,
+  "properties": {
+    "eventId": { "type": "string", "format": "uuid" },
+    "eventType": { "const": "RematchRequested" },
+    "schemaVersion": { "const": 1 },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "requestId": { "type": "string", "format": "uuid" },
+    "type": { "enum": ["WATER", "FOOD", "MEDICINE", "TRANSPORT", "SHELTER"] },
+    "reason": {
+      "enum": ["UNMATCHED", "STALE_PENDING"],
+      "description": "UNMATCHED: no resource was found earlier; one may exist now. STALE_PENDING: the request has stayed PENDING longer than REMATCH_PENDING_AGE, so its RequestCreated event was probably never delivered."
+    }
+  },
+  "examples": [
+    {
+      "eventId": "5b0f2a6e-3c1d-4e8f-9a7b-6c5d4e3f2a1b",
+      "eventType": "RematchRequested",
+      "schemaVersion": 1,
+      "occurredAt": "2026-11-21T09:02:00.004Z",
+      "requestId": "f3b1c2e4-0d1e-4a5b-9c8d-7e6f5a4b3c2d",
+      "type": "WATER",
+      "reason": "UNMATCHED"
+    }
+  ]
+}

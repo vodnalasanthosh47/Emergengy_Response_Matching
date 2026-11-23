@@ -96,6 +96,19 @@ class StorageStoresTest {
     }
 
     @Test
+    void waitingRequestsAreFoundByTheStatusIndexOnAllShards() {
+        RequestDocument unmatched = Fixtures.request("0c9f8b52-6a1e-4f43-9d0b-1f2e3d4c5b6a", Category.WATER, Fixtures.LAT,
+                Fixtures.LNG, "{\"quantity\":20,\"unit\":\"L\"}", RequestStatus.UNMATCHED);
+        server.expect(requestTo(BASE + "/v1/query")).andExpect(method(HttpMethod.POST))
+                .andExpect(content().json("""
+                        {"collection":"request","geoCells":[],"match":{"status":"UNMATCHED"},"limit":1000}""", true))
+                .andRespond(withSuccess("{\"records\":[" + record("request:" + unmatched.requestId(), unmatched,
+                        StorageRequestStore.indexes(unmatched), 3) + "]}", MediaType.APPLICATION_JSON));
+        assertThat(requests.withStatus(RequestStatus.UNMATCHED, 1000)).containsExactly(unmatched);
+        server.verify();
+    }
+
+    @Test
     void candidateSearchAsksForAvailableResourcesInTheCells() {
         server.expect(requestTo(BASE + "/v1/query")).andExpect(method(HttpMethod.POST))
                 .andExpect(content().json("""

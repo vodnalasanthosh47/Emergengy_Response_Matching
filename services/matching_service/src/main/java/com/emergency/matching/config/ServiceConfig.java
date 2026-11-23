@@ -34,8 +34,9 @@ public class ServiceConfig {
         return new StorageClient(props.coordinatorUrl(), props.storageTimeout(), json);
     }
 
+    /** Also the rematch sweeper's {@code WaitingRequests}, hence the concrete type. */
     @Bean
-    RequestStore requestStore(StorageClient storage) {
+    StorageRequestStore requestStore(StorageClient storage) {
         return new StorageRequestStore(storage);
     }
 

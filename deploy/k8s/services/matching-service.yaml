@@ -39,6 +39,10 @@ spec:
               valueFrom: { secretKeyRef: { name: rabbitmq-credentials, key: username } }
             - name: RABBITMQ_PASSWORD
               valueFrom: { secretKeyRef: { name: rabbitmq-credentials, key: password } }
+            # Rematch sweeper: every pod runs the timer, the one holding the storage lease
+            # re-queues the waiting requests (UNMATCHED, or PENDING for over the age).
+            - { name: REMATCH_INTERVAL, value: 2m }
+            - { name: REMATCH_PENDING_AGE, value: 2m }
           # Spring Boot's probe endpoints (management.endpoint.health.probes).
           # startup: give the JVM up to 3 minutes before liveness counts.
           startupProbe:

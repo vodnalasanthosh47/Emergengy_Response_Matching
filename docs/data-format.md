@@ -44,6 +44,12 @@ The key decides the shard, so it must be built exactly as below.
 |---|---|---|---|---|
 | request | `request:{requestId}` | `crc32(requestId) mod 3` | `request:f3b1c2e4-0d1e-4a5b-9c8d-7e6f5a4b3c2d` | 0 |
 | resource | `resource:{geoCell}:{uuid}` | `crc32(geoCell) mod 3` | `resource:tdr1v9:8a7c3e0e-4c1d-4b9a-9d55-0d3c2f1a9b77` | 1 (cell `tdr1v9`) |
+| lease | `lease:{name}` | `crc32(key) mod 3` | `lease:rematch-sweeper` | (whole key hashed) |
+
+`lease:rematch-sweeper` is the Matching Service's only non-domain record: value
+`{"holder": "<pod>-<suffix>", "expiresAt": "<ISO-8601>"}`, indexes `{"collection": "lease"}`.
+It decides which matching pod runs the rematch sweeper; it is taken and renewed with
+`expectedVersion` like any claim (services/matching_service/README.md §2a).
 
 ### 2.1 Parts
 

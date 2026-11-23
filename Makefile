@@ -23,7 +23,7 @@ K8S_MEMORY  ?= 6800
 ENVOY_GATEWAY_VERSION ?= v1.9.3
 
 .PHONY: help build test test-go test-java images up up-dev down logs ps topology storage-smoke \
-	storage-failover storage-resilience storage-e2e request-smoke resource-smoke matching-smoke smoke \
+	storage-failover storage-resilience storage-e2e request-smoke resource-smoke matching-smoke smoke rematch-smoke \
 	k8s-start k8s-gateway-install k8s-images k8s-secrets k8s-up k8s-forward k8s-status k8s-recovery \
 	k8s-scaling k8s-storage-failover k8s-e2e k8s-down \
 	k8s-clean demo clean
@@ -100,6 +100,9 @@ matching-smoke: ## Matching end to end: event-driven match, no double booking, r
 	BASE_URL=$${BASE_URL:-http://localhost:8080} tests/e2e/matching-smoke.sh
 
 smoke: request-smoke resource-smoke matching-smoke ## All service smoke tests through the gateway (CP1)
+
+rematch-smoke: ## Rematch sweeper: an UNMATCHED request gets matched on its own once a resource appears (waits for the timer; fast with REMATCH_INTERVAL=15s make up-dev)
+	BASE_URL=$${BASE_URL:-http://localhost:8080} tests/e2e/rematch-smoke.sh
 
 # ---- Kubernetes (Minikube) -----------------------------------------------------------
 # First time:  make k8s-start k8s-gateway-install k8s-images k8s-up

@@ -59,7 +59,7 @@ succeed: the second gets `409`, re-reads, and sees the reduced capacity.
 
 | Item | Value |
 |---|---|
-| Queue | `matching.request-created`, durable, bound to `emergency.events` with `request.created.*` |
+| Queue | `matching.request-created`, durable, bound to `emergency.events` with `request.created.*` and `request.rematch.*` (the sweeper, §2a) |
 | Dead letters | queue argument `x-dead-letter-exchange: emergency.dlx` (fanout) → `matching.request-created.dlq` |
 | Ack | manual, prefetch 10 |
 
@@ -68,7 +68,7 @@ succeed: the second gets `409`, re-reads, and sees the reduced capacity.
 - **retry in place** (`EVENT_ATTEMPTS`, default 3, `EVENT_RETRY_DELAY` 1 s apart) while
   storage is unavailable or the request keeps changing;
 - **nack without requeue → DLQ** after that, or for a malformed message (not JSON, not
-  `RequestCreated` v1, no request ID). A dead-lettered request can be matched later with
+  `RequestCreated` v1 or `RematchRequested` v1, no request ID). A dead-lettered request can be matched later with
   `POST /match/{id}`.
 
 Only the event's request ID is used; the request is re-read, because the snapshot in the
@@ -76,6 +76,44 @@ event may be stale. The service declares the topology on startup (and the
 `emergency.events` exchange too, with the Request Service's settings), so start order
 does not matter. In Compose the gateway waits for this service, so the queue exists
 before clients create requests.
+
+## 2a. The rematch sweeper (safety net)
+
+A request that finds nothing becomes UNMATCHED. Without help it would stay that way even
+after a fitting resource is registered. So every `REMATCH_INTERVAL` (default **2 min**)
+the service puts the requests that are still waiting back on its own queue:
+
+| Re-queued | Why |
+|---|---|
+| `UNMATCHED` requests | a resource may have been registered, come back online, or had capacity given back since |
+| `PENDING` requests unchanged for `REMATCH_PENDING_AGE` (2 min) | their `RequestCreated` was probably lost (the Request Service crashed between storing and publishing), or a client set an UNMATCHED request back to PENDING |
+
+How a pass works (`RematchSweeper`):
+
+1. **Take the lease.** Every pod runs the timer, but only one sweeps: the holder of the
+   storage record `lease:rematch-sweeper` = `{holder, expiresAt}`, written with
+   `expectedVersion` like every claim, so two racing pods cannot both win. The lease
+   lasts 1.5 intervals and is renewed on every pass; if its holder dies, another pod takes
+   over within about 2.5 intervals.
+2. **Find waiting requests:** `/v1/query` on the request `status` index (UNMATCHED, then
+   PENDING filtered by age), up to 1000 each. Requests are sharded by ID, so this asks all
+   three shards.
+3. **Publish** each as a `RematchRequested` message (contracts/events/rematch-requested.v1.json),
+   routing key `request.rematch.<type>`, oldest request first, at most
+   `REMATCH_BATCH_SIZE` (500) per pass.
+4. The **normal consumer** handles them like `RequestCreated`: re-read, match only if still
+   PENDING or UNMATCHED. A request with still nothing nearby stays UNMATCHED (no write); one
+   matched meanwhile is left alone. So re-queuing is always safe.
+
+This is a reconciliation loop: instead of reacting to every event that could make a match
+possible (new resource, resource back online, capacity released), it regularly re-checks
+what is still waiting. It covers all of them, and lost messages too, at the cost of up to
+one interval of delay. `POST /match/{id}` still matches a request immediately.
+
+Failures: a pass with storage down is skipped (logged); a broker failure stops the pass,
+and the remaining requests wait for the next one. Messages are persistent but not
+publisher-confirmed: a lost one is simply re-published by the next pass. Passes run with
+a fixed delay, so they never overlap.
 
 ## 3. API
 
@@ -95,12 +133,17 @@ before clients create requests.
 ```
 services/matching_service/src/main/java/com/emergency/matching/
   domain/     MatchingService (algorithm), CandidateRanking (fit + order), Demand (amount),
-              ports RequestStore / ResourceStore, Versioned, MatchOutcome, exceptions
-  storage/    StorageRequestStore, StorageResourceStore: the ports on the coordinator
-  messaging/  RequestCreatedListener: manual ack, retries, DLQ
+              RematchSweeper (re-queues waiting requests), ports RequestStore /
+              ResourceStore / WaitingRequests / RematchPublisher / SweepLease, Versioned,
+              MatchOutcome, exceptions
+  storage/    StorageRequestStore, StorageResourceStore, StorageSweepLease: the ports on
+              the coordinator
+  messaging/  RequestCreatedListener: manual ack, retries, DLQ (RequestCreated and
+              RematchRequested); RabbitRematchPublisher
   api/        MatchController, MatchResult, ApiExceptionHandler
   config/     ServiceConfig (wiring), RabbitTopologyConfig (queue, DLX, DLQ, bindings),
-              MatchingServiceProperties, JacksonConfig, StorageHealthIndicator
+              RematchConfig (sweeper timer and lease), MatchingServiceProperties,
+              JacksonConfig, StorageHealthIndicator
 ```
 
 The domain has no Spring annotations and does not know HTTP or AMQP.
@@ -115,6 +158,10 @@ The domain has no Spring annotations and does not know HTTP or AMQP.
 | `STORAGE_TIMEOUT` | `10s` | bound on each storage call |
 | `CANDIDATE_LIMIT` | `100` | resources fetched from the 9 cells |
 | `EVENT_ATTEMPTS` / `EVENT_RETRY_DELAY` | `3` / `1s` | in-place retries before the DLQ |
+| `REMATCH_ENABLED` | `true` | run the rematch sweeper (§2a) |
+| `REMATCH_INTERVAL` | `2m` | pause between two sweeper passes |
+| `REMATCH_PENDING_AGE` | `2m` | a PENDING request unchanged this long is re-queued too |
+| `REMATCH_BATCH_SIZE` | `500` | most requests re-queued in one pass (1–1000) |
 
 Health: `/actuator/health/readiness` needs RabbitMQ and the coordinator;
 `/actuator/prometheus` for metrics.
@@ -129,9 +176,12 @@ Health: `/actuator/health/readiness` needs RabbitMQ and the coordinator;
 | `CandidateRankingTest` | 6 | nearest fitting first, exact fit, tie-breaks, type/status filter, medicine names |
 | `MatchingServiceTest` | 25 | happy path; deplete at 0; decimals exact; UNMATCHED; re-match later; every non-matchable status untouched; same request twice; claim conflict retried / skipped / capped; cancelled mid-match → released; MATCHED write with an unknown outcome (storage 503 / timeout): applied → claim kept, not applied → written again, cancelled → released, never confirmed → claim kept and reported |
 | `MatchingConcurrencyTest` | 120 | real threads, repeated: 2 requests for 1 resource → one MATCHED; 10 requests for 3 places → exactly 3; the same request twice at once → one claim |
-| `StorageStoresTest` | 5 | exact keys, bodies, indexes, `expectedVersion`; error mapping |
+| `RematchSweeperTest` | 8 | UNMATCHED and old PENDING re-queued, fresh PENDING not; oldest first, capped; broker down stops the pass; storage down publishes nothing; no lease → no work |
+| `StorageStoresTest` | 6 | exact keys, bodies, indexes, `expectedVersion`; error mapping; status query for the sweeper |
+| `StorageSweepLeaseTest` | 15 | first pod takes it; others refused while valid; holder renews; takeover after expiry; racing pods → exactly one; storage down reported |
 | `MatchControllerTest` | 6 | every outcome and exception → status and error JSON |
-| `MatchingServiceApplicationTest` | 7 | real RabbitMQ: event → MATCHED; redelivery claims nothing; UNMATCHED; malformed → DLQ; storage down → DLQ, then POST /match; HTTP; health |
+| `MatchingServiceApplicationTest` | 9 | real RabbitMQ: event → MATCHED; redelivery claims nothing; UNMATCHED; `RematchRequested` → MATCHED; one sweeper pass → MATCHED; malformed → DLQ; storage down → DLQ, then POST /match; HTTP; health |
+| `RematchScheduleTest` | 1 | the timer alone (300 ms interval): an UNMATCHED and a stuck PENDING request are matched once a resource appears, each claiming once |
 
 Mutation check: removing the release, or the re-check after a lost claim race, fails
 52 / 68 of these tests.
@@ -142,6 +192,10 @@ resource (one MATCHED, one UNMATCHED), the same event published twice more (no s
 claim), `POST /match` 422 → 200 → 409, 404, 400, and an empty DLQ. Checked by hand:
 `docker compose exec matching-service sh -c 'kill 1'` → Docker restarts it, healthy in
 2 s, and the smoke test passes again.
+
+`make rematch-smoke` (real cluster): a request becomes UNMATCHED, a resource is registered
+afterwards, and the sweeper matches the request without `POST /match`. It waits for the
+timer, so run the stack with a short interval: `REMATCH_INTERVAL=15s make up-dev`.
 
 ## 7. CP1 Definition of Done (the matching parts)
 
@@ -159,8 +213,8 @@ claim), `POST /match` 422 → 200 → 409, 404, 400, and an empty DLQ. Checked b
 |---|---|---|
 | 1 | Push `feat/matching-service`, then merge everything into `main` | Branch is local only |
 | 2 | Crash between "claim" and "mark MATCHED" loses that capacity | Documented gap (spec §5). A definite storage error there (409 then failed re-read, 400) releases the claim. A 503 or timeout has an unknown outcome (the write may have landed): the request is re-read and the MATCHED write retried, and if storage never confirms either way the claim is **kept** and logged, because giving it back could double-book. A process crash cannot release. Fix: outbox / reconciliation job |
-| 3 | UNMATCHED requests are not re-matched automatically when a resource is registered | CP2+ (spec §7.2); use `POST /match/{id}` meanwhile |
+| 3 | ~~UNMATCHED requests are not re-matched automatically~~ | Done: the rematch sweeper (§2a) re-queues them every `REMATCH_INTERVAL`. Matching happens up to one interval after a resource appears; `POST /match/{id}` is immediate |
 | 4 | Cancelling or fulfilling a MATCHED request does not give capacity back | Out of scope for CP1 (spec §7.2) |
-| 5 | Dead-lettered events are not replayed automatically | Inspect `matching.request-created.dlq` in the RabbitMQ UI; re-match with `POST /match/{id}` |
+| 5 | Dead-lettered events are not replayed | Their requests are not lost: still PENDING/UNMATCHED in storage, so the sweeper re-queues them. Inspect `matching.request-created.dlq` in the RabbitMQ UI if needed |
 | 6 | No widening of the search to precision 5 when the 9 cells have nothing | Spec §3.4 "CP2+" |
 | 7 | Kubernetes manifests (Deployment ≥2 replicas, Service, HTTPRoute) | CP2. Several replicas are safe: claims are compare-and-set, and each event is delivered to one consumer |

@@ -6,11 +6,16 @@ info:
     Finds and claims a resource for an emergency request (PROJECT_SPEC §4.1, §5; PDF §7).
     Reached through the gateway at `/match`.
 
-    The same algorithm runs in two ways:
+    The same algorithm runs in three ways:
     - **asynchronously**, for every `RequestCreated` event on the queue
       `matching.request-created` (contracts/events/request-created.v1.json);
-    - **synchronously**, through `POST /match/{requestId}` (e.g. to retry an UNMATCHED
-      request after new resources were registered).
+    - **periodically**: every `REMATCH_INTERVAL` (default 2 min) a sweeper re-queues the
+      requests still waiting for a resource (UNMATCHED, or PENDING for longer than
+      `REMATCH_PENDING_AGE`) as `RematchRequested` events on the same queue
+      (contracts/events/rematch-requested.v1.json), so a resource registered later is
+      found without anyone calling `/match`;
+    - **synchronously**, through `POST /match/{requestId}` (e.g. to match an UNMATCHED
+      request right away instead of waiting for the next sweep).
 
     Algorithm (spec §5):
     1. Re-read the request from storage; only `PENDING` and `UNMATCHED` requests are
@@ -29,8 +34,9 @@ info:
     7. No candidate: the request becomes `UNMATCHED`.
 
     RabbitMQ topology owned by this service: queue `matching.request-created` (durable,
-    bound to `emergency.events` with `request.created.*`, dead-letter exchange
-    `emergency.dlx`), and the dead-letter queue `matching.request-created.dlq`.
+    bound to `emergency.events` with `request.created.*` and `request.rematch.*`,
+    dead-letter exchange `emergency.dlx`), and the dead-letter queue
+    `matching.request-created.dlq`.
 servers:
   - url: http://localhost:8080
     description: Through the local gateway
